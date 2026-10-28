@@ -1,0 +1,12 @@
+{
+  "name": "@tmtp/http-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tmtp/clock": "workspace:*",
+    "@tmtp/logging": "workspace:*",
+    "@tmtp/retry": "workspace:*",
+    "undici": "catalog:"
+  }
+}

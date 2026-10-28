@@ -1,0 +1,10 @@
+{
+  "name": "@tmtp/llm-openai-compatible",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tmtp/llm-interface": "workspace:*",
+    "openai": "catalog:"
+  }
+}

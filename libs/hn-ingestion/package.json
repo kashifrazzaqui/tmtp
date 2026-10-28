@@ -1,0 +1,15 @@
+{
+  "name": "@tmtp/hn-ingestion",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tmtp/clock": "workspace:*",
+    "@tmtp/domain": "workspace:*",
+    "@tmtp/hn-account": "workspace:*",
+    "@tmtp/hn-public-api": "workspace:*",
+    "@tmtp/interests": "workspace:*",
+    "@tmtp/job-queue": "workspace:*",
+    "@tmtp/reader-store": "workspace:*"
+  }
+}

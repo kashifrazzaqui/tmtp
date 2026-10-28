@@ -1,0 +1,14 @@
+{
+  "name": "tmtp",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.26.2",
+  "engines": {
+    "node": ">=24.15 <25"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

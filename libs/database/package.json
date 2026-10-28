@@ -1,0 +1,12 @@
+{
+  "name": "@tmtp/database",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "better-sqlite3": "catalog:"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "catalog:"
+  }
+}

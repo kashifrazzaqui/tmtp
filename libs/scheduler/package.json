@@ -1,0 +1,11 @@
+{
+  "name": "@tmtp/scheduler",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tmtp/clock": "workspace:*",
+    "@tmtp/logging": "workspace:*",
+    "croner": "catalog:"
+  }
+}

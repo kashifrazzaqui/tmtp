@@ -1,0 +1,10 @@
+{
+  "name": "@tmtp/hn-public-api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tmtp/domain": "workspace:*",
+    "@tmtp/http-client": "workspace:*"
+  }
+}

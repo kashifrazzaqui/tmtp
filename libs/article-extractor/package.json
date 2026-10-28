@@ -1,0 +1,14 @@
+{
+  "name": "@tmtp/article-extractor",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@mozilla/readability": "catalog:",
+    "dompurify": "catalog:",
+    "jsdom": "catalog:"
+  },
+  "devDependencies": {
+    "@types/jsdom": "catalog:"
+  }
+}

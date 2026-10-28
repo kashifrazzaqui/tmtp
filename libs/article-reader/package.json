@@ -1,0 +1,11 @@
+{
+  "name": "@tmtp/article-reader",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tmtp/article-extractor": "workspace:*",
+    "@tmtp/article-fetcher": "workspace:*",
+    "@tmtp/domain": "workspace:*"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@tmtp/recommendations",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tmtp/domain": "workspace:*",
+    "@tmtp/interests": "workspace:*",
+    "@tmtp/llm-interface": "workspace:*",
+    "@tmtp/queue": "workspace:*",
+    "zod": "catalog:"
+  }
+}

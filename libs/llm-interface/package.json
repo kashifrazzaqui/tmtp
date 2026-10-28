@@ -1,0 +1,6 @@
+{
+  "name": "@tmtp/llm-interface",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module"
+}

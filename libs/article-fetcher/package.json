@@ -1,0 +1,11 @@
+{
+  "name": "@tmtp/article-fetcher",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tmtp/clock": "workspace:*",
+    "@tmtp/http-client": "workspace:*",
+    "ip-address": "catalog:"
+  }
+}
