@@ -1,0 +1,30 @@
+implementation_order:
+  - phase: A
+    tier: 0
+    libs: [article-extractor, clock, config, database, domain, llm-interface, logging, retry]
+    services: []
+  - phase: B
+    tier: 1
+    depends_on: [A]
+    libs: [access-control, activity, http-client, interests, job-queue, llm-openai-compatible, queue, reader-store, scheduler]
+    services: []
+  - phase: C
+    tier: 2
+    depends_on: [B]
+    libs: [article-fetcher, diagnostics, hn-account, hn-public-api, recommendations]
+    services: []
+  - phase: D
+    tier: 3
+    depends_on: [C]
+    libs: [article-reader, hn-ingestion, personalization]
+    services: []
+  - phase: E
+    tier: 4
+    depends_on: [D]
+    libs: [reader-app]
+    services: []
+  - phase: F
+    tier: 5
+    depends_on: [E]
+    libs: []
+    services: [personal-reader]
