@@ -287,3 +287,48 @@
 **Revisit if:** Packages are published independently, the workspace changes package managers, or additional native dependencies require a broader trust policy.
 
 ---
+
+## 2026-10-28 — Strict domain records and synchronous database boundaries
+**Chosen:** Use schema-first strict domain records, versioned variable JSON, positional SQL parameters, synchronous nested transactions, and lexically ordered migrations with SHA-256 checksum verification. Reject async transaction callbacks.
+**Alternatives:** Permissive untyped records; an ORM/query builder; async transaction callbacks; unversioned or mutable applied migrations.
+**Why:** The reading memory depends on explicit state invariants and atomic local commits. Strict records and checksums make drift visible, while synchronous transactions prevent an accidental early commit across an `await`.
+**Trade-offs:** Repositories need explicit row/JSON mapping and producers must version payloads. Synchronous SQL can block the event loop, so queries and batches must stay short. Adding fields requires deliberate schema/migration work.
+**Revisit if:** Query/mapping complexity outweighs the safety benefit or the runtime moves away from the single-writer synchronous SQLite model.
+
+---
+
+## 2026-10-28 — Injectable time and retry sources
+**Chosen:** Separate wall and monotonic clocks; keep fixed clocks forward-only; inject sleep, random, and monotonic sources into retry. Count the first call in `maxAttempts` and use capped exponential delay with bounded symmetric jitter while preserving original errors.
+**Alternatives:** Patch global timers/randomness in tests; expose raw `p-retry` behavior; use wall time for elapsed durations; wrap every terminal failure in a new retry error.
+**Why:** Explicit sources make timestamps, delays, cancellation, and failure behavior deterministic without changing the tier graph. Preserving original errors keeps domain classification with callers.
+**Trade-offs:** Consumers pass more dependencies and fixed clocks do not drive timers. The `p-retry` adapter needs compatibility tests and private error envelopes to suppress unwanted dependency behavior.
+**Revisit if:** The dependency's native behavior matches the contract or a general virtual-time scheduler becomes necessary.
+
+---
+
+## 2026-10-28 — Secret-safe configuration and logging diagnostics
+**Chosen:** Restrict product configuration to static schema paths and fixed safe issue messages. Require explicit secret registration for logging, redact keys and values recursively, allowlist error fields, and write NDJSON synchronously to stdout with visible write failures.
+**Alternatives:** Return raw Zod messages/input; rely only on Pino path redaction; use asynchronous/default Pino destinations; allow arbitrary transports and error properties.
+**Why:** Configuration and logs are high-risk secret boundaries. Static paths and allowlisted projections make non-echo guarantees testable. Synchronous stdout gives one process simple ordering and no hidden shutdown buffer.
+**Trade-offs:** Operators receive less detailed validation messages and exact-value redaction cannot recognize transformed secrets. Recursive sanitation costs CPU and synchronous writes can block; dynamic configuration maps and custom transports are excluded.
+**Revisit if:** Measured logging volume requires asynchronous transport or a reviewed structured diagnostic format can provide richer detail without exposing input.
+
+---
+
+## 2026-10-28 — Synchronous versioned article extraction
+**Chosen:** Extract with fresh inert jsdom documents and Readability, truncate readable text before sanitization, apply a restrictive DOMPurify HTML profile, normalize safe absolute URLs, and version/hash the deterministic result.
+**Alternatives:** A production browser; sanitizing only the source document; returning unsanitized Readability output; rejecting every over-length article; asynchronous APIs around blocking CPU work.
+**Why:** The reader needs consistent content without executing or fetching untrusted page resources. A pure synchronous API matches the selected parser/sanitizer and makes provenance and resource bounds explicit.
+**Trade-offs:** Extraction blocks the calling thread and cannot be cancelled mid-call. The restrictive profile loses site presentation and truncation loses later content; original-page fallback remains necessary.
+**Revisit if:** Corpus benchmarks require rendered pages or measured CPU/latency requires isolated worker execution.
+
+---
+
+## 2026-10-28 — Type-only LLM port with complete attempt audits
+**Chosen:** Keep `llm-interface` free of runtime code/dependencies. Require structured local parsing, canonical non-secret request hashes, every attempt audit on success and error, and explicit opt-in versioned payload capture.
+**Alternatives:** A runtime provider base class; expose SDK responses/errors; retain only the final attempt; capture payloads by default; hash only prompt text.
+**Why:** Recommendation logic needs provider independence without losing retry/usage evidence. A complete canonical projection makes requests inspectable and reproducible while capture remains off by default.
+**Trade-offs:** Every adapter must implement and pass the same behavioral contract suite. TypeScript cannot type Promise rejections, and providers still vary in structured-output behavior. Payload capture requires careful non-secret projections.
+**Revisit if:** Multiple adapters share enough behavior to justify a separate reviewed runtime base package without weakening provider independence.
+
+---

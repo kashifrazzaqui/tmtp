@@ -37,7 +37,7 @@ Consumer projection + JsonSchema + parseOutput
   -> LlmResult<T> with all attempt audits
 ```
 
-Every provider attempt branches into exactly one audit outcome: success, invalid output, provider error, timeout, or cancellation. A bounded adapter retry loop feeds earlier audits into the eventual result or `LlmError`. Pre-I/O validation and pre-aborted calls bypass the attempt loop and return an empty audit array.
+Every provider attempt branches into exactly one audit outcome: success, invalid output, provider error, timeout, or cancellation. A bounded adapter retry loop feeds earlier audits into the eventual result or `LlmError`. Pre-I/O validation and pre-aborted calls bypass the attempt loop and return an empty audit array. Cancellation between retries or after an attempt has settled also creates no audit because no provider call exists to audit; the error is cancelled while the retained final audit describes the actual earlier attempt.
 
 Audit persistence is a later mapping step:
 

@@ -211,8 +211,8 @@ All expected validation, cancellation, timeout, provider, transport, and local o
 
 - it is empty for an already-aborted call or pre-I/O invalid request;
 - otherwise it contains every started attempt in order;
-- the final attempt status agrees with the error category: `timeout` → `timeout`, `cancelled` → `cancelled`, `invalid-output` → `invalid-output`, and `rate-limit`/`provider` → `provider-error`;
-- the final attempt's `errorCode` equals the error's `code`.
+- when failure belongs to an in-flight attempt, the final attempt status agrees with the error category: `timeout` → `timeout`, `cancelled` → `cancelled`, `invalid-output` → `invalid-output`, and `rate-limit`/`provider` → `provider-error`, and its `errorCode` equals the error's `code`;
+- cancellation observed between attempts or after the last attempt has settled creates no synthetic audit. The last audit retains that attempt's actual status/code while the returned error is `cancelled`; this is the only permitted final-status/error-code mismatch.
 
 `message` is a short safe summary. Consumers branch on `category`, `code`, and `retryable`, never on message text. Cancellation never starts another retry after the signal aborts.
 
@@ -266,7 +266,7 @@ These tests run against concrete adapters in their owning packages with a mocked
 - With capture off, all four payload/version fields are absent on success and failure. With capture on, request payload/version are present for every attempt, response payload/version appear only after a successfully decoded JSON response, and hashes equal capture-off hashes.
 - Place unique secret sentinels in adapter credentials and authorization headers. Assert they never occur in serialized results, errors, audits, or captured payloads. Composition tests separately verify callers do not place secrets in prompt projections.
 - Timeout, rate-limit, permanent provider error, and transient provider error map to the documented category/status/code/retryable behavior without raw SDK errors.
-- An already-aborted signal performs no provider I/O, does not invoke `parseOutput`, and returns `cancelled` with no attempts. Mid-attempt cancellation records one cancelled audit and starts no retry.
+- An already-aborted signal performs no provider I/O, does not invoke `parseOutput`, and returns `cancelled` with no attempts. Mid-attempt cancellation records one cancelled audit and starts no retry. Cancellation between retries returns `cancelled` without adding an audit or changing the prior attempt's recorded outcome.
 - Concurrent and interleaved operations preserve request/response pairing, parser values, audit order, unique call IDs, and independent cancellation.
 
 ### Workflow acceptance
