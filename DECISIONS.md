@@ -332,3 +332,84 @@
 **Revisit if:** Multiple adapters share enough behavior to justify a separate reviewed runtime base package without weakening provider independence.
 
 ---
+
+## 2026-10-28 — Hash-only sessions with asynchronous verification
+**Chosen:** Issue independent random bearer/CSRF secrets, store only SHA-256 hashes, use fixed absolute expiry, and reserve process-local login-throttle slots before Web Crypto awaits. Authentication, logout, and CSRF APIs are asynchronous while each store check/write sequence stays synchronous.
+**Alternatives:** Store raw session secrets; synchronous token comparison; sliding expiration; per-token/IP throttle maps; hold a database transaction across digest operations.
+**Why:** Hash-only storage limits the value of a database disclosure, independent secrets prevent cross-use, and synchronous critical sections fit the single-writer topology without holding transactions across I/O.
+**Trade-offs:** Raw CSRF secrets cannot be recovered, so loss requires re-login. The throttle resets on restart and all attempts consume capacity. JavaScript fixed-work digest comparison is not a formal hardware constant-time guarantee.
+**Revisit if:** The process topology changes, stronger timing guarantees are required, or a separately reviewed CSRF rotation/recovery flow is added.
+
+---
+
+## 2026-10-28 — Replayable activity and bounded interest evidence
+**Chosen:** Use deterministic event/session IDs, logical replay comparison that ignores receipt time, one-story atomic batches, and a latest active-or-terminal session high-watermark. Orphan closers create zero-length terminal sessions. Interest building reads a newest contiguous activity suffix plus an independent latest-log version.
+**Alternatives:** Generate fresh IDs per retry; byte-compare repository records before reduction; track only active sessions; drop orphaned closers; scan the full activity log for every profile build.
+**Why:** At-least-once delivery must not double-count dwell or fork session projections. The terminal high-watermark makes incremental and ordered rebuilds agree. Bounded suffixes control profile-build work without deleting activity history.
+**Trade-offs:** Producers must retain stable idempotency IDs and send per-story ordered observations. Delayed stale observations fail instead of merging. A zero-sized window still needs separate version lookup, and profile policy changes can rebuild projections differently.
+**Revisit if:** Multi-process activity writers require atomic replay claims/session versions or corpus measurements justify a different materialized evidence window.
+
+---
+
+## 2026-10-28 — Leased SQLite jobs and explicit repository queries
+**Chosen:** Keep jobs in the shared database with versioned payload codecs, active dedupe, token-checked leases, bounded recovery, deterministic backoff, and terminal poison-payload failure. Reader-store uses handwritten keyset repositories, globally ordered migrations, and explicit latest-session/newest-window/content-staleness queries.
+**Alternatives:** An external broker; fire-and-forget jobs; handler invocation inside claim transactions; offset paging; hide stale payload/content behind indefinite retries; derive feature queries ad hoc in consumers.
+**Why:** One-process deployment still needs crash recovery and atomic cross-aggregate handoffs. Explicit leases and queries make at-least-once behavior, complete queue pagination, and re-extraction/scoring eligibility inspectable.
+**Trade-offs:** Every effect must be idempotent and long handlers must renew leases. SQL mappings and payload migrations require maintenance. Recovery and profile/content work take bounded passes rather than one unbounded transaction.
+**Revisit if:** Multiple writers or much higher throughput requires a different coordination primitive, or query complexity justifies another reviewed storage abstraction.
+
+---
+
+## 2026-10-28 — Deterministic transport and scheduler lifecycles
+**Chosen:** Give HTTP one total deadline, GET-only retries, bounded bodies, explicit redirects/pins, injected sleep/random/monotonic sources, and idempotent close. Give scheduler an injected Croner driver, per-task overrun policy, and stop/drain semantics; keep durability in jobs/stores.
+**Alternatives:** Use global timers/randomness; retry POST automatically; let FixedClock drive Croner; persist generic scheduler last-run records; make close cancel active requests.
+**Why:** Network mutation retries can duplicate HN actions, and deterministic test seams are necessary for exact timing behavior. Scheduler triggers are only hints; durable state owns missed-work recovery.
+**Trade-offs:** Custom transports/sleepers must cooperate with cancellation. Total HTTP deadlines include redirects/backoff, while close can wait for existing calls. Scheduler has no built-in task timeout/catch-up and service startup must recover idempotent work explicitly.
+**Revisit if:** A general virtual-time scheduler is introduced or durable wall-clock schedule history becomes a product requirement.
+
+---
+
+## 2026-10-28 — Versioned complete queue projections and unsigned cursors
+**Chosen:** Rank complete story sets with exact profile/content-active recommendations, deterministic lower-half exploration, content-addressed rank versions, and pending/failed sections. Use checksummed but unsigned keyset cursors. Preserve reading state while recomputing blacklist visibility, and use a queue-owned bootstrap version for initial ingestion.
+**Alternatives:** Offset pagination; signed cursors with a new secret; random exploration per request; treat pending/failed as low scores; preserve old visibility during preference changes; let ingestion invent a rank version.
+**Why:** Every story must remain reachable and explanations must not drift across profiles/content versions. Structural cursors need no key management, and a bootstrap callback preserves the dependency graph while giving initial rows a valid version.
+**Trade-offs:** Complete ranking must assemble its canonical input before publishing a version. Hidden rows create rank-position gaps, and unsigned cursors are editable but read-only/non-authorizing. Changing filters or rank versions restarts pagination.
+**Revisit if:** Queue scale requires a different materialization strategy or a new threat model genuinely requires authenticated cursor transport.
+
+---
+
+## 2026-10-28 — Audited OpenAI JSON-mode adapter
+**Chosen:** Use non-streaming Chat Completions JSON-object mode with object-root schemas, local parsing, adapter-owned retries/deadlines, and a six-field canonical request hash including `maxOutputTokens`. Require an explicit model per request. Capture complete successful response bodies only; omit unavailable complete error envelopes.
+**Alternatives:** SDK-native retries/parsers; strict provider-side `json_schema`; arbitrary root schemas; a redundant default-model option; partial API-error-body capture; raw provider errors.
+**Why:** One SDK call must equal one visible attempt. The pinned SDK does not bound every error-body read with its native timeout and unwraps API-error envelopes, so the adapter needs its own deadline and must not claim unavailable capture fidelity.
+**Trade-offs:** JSON mode is not schema enforcement and excludes non-object roots. Owning retries duplicates some SDK policy. Provider errors have less captured evidence, and full error-body capture would require a redesigned raw-transport seam.
+**Revisit if:** The SDK changes its timeout/error behavior or a provider capability review justifies strict structured outputs or a new capture contract.
+
+---
+
+## 2026-10-28 — Shared bootstrap rank namespace
+**Chosen:** Use one `QUEUE_BOOTSTRAP_RANK_VERSION` for all initial pending rows, independent of profile. This supersedes the profile-scoped bootstrap aspect of the preceding queue decision; complete reprojection still owns profile-specific ranking and visibility.
+**Alternatives:** Include the current profile ID in bootstrap versions; atomically migrate every initial row on every profile change.
+**Why:** Lookahead showed that ingestion under a new profile before complete reprojection could split existing and new pending rows across incompatible rank-version pages. A shared namespace keeps the initial queue complete without a fragile migration requirement.
+**Trade-offs:** The bootstrap version does not describe profile visibility, so mixed initial rows rely on stored visibility until complete reprojection recomputes the full set. Pending order remains story-ID based and profile-independent.
+**Revisit if:** Initial rows gain profile-specific ordering rather than only visibility/state.
+
+---
+
+## 2026-10-28 — Article-aware immutable recommendation identity
+**Chosen:** Add a domain-owned derived `Article.contentVersion` and include it in every recommendation's immutable key, ID, store eligibility check, and queue activation rule. Missing/pending/failed/ready states are versioned by their actual prompt input; ready versions cover metadata, content hash, and extractor version.
+**Alternatives:** Keep recommendations keyed only by HN story content; hash article text only inside recommendation IDs; include full article text/URLs/errors/timestamps in the key; overwrite same-key judgments after extraction changes.
+**Why:** Article content affects generation, so an article-only change must create a new historical judgment rather than an immutable conflict. One domain helper prevents store, queue, and producer hash drift while SQL compares the stored derived version.
+**Trade-offs:** Article and recommendation schemas gain required version fields and producers must validate the derived value. Status-only article changes can trigger a new judgment, and ready metadata changes invalidate even when text is unchanged. Raw article text remains out of the key through its content hash.
+**Revisit if:** The prompt stops using article state/content or a single stored projection can no longer represent all article-derived prompt inputs.
+
+---
+
+## 2026-10-28 — Derived bounded diagnostic history
+**Chosen:** Project recent errors from existing ingestion, LLM, HN-action, and failed-job records with stable source-prefixed IDs and codes. Merge bounded keyset candidates in diagnostics; paginate sync runs, LLM calls, jobs, and version counts explicitly. Persist `Job.lastErrorCode` separately from its safe message. Add no diagnostic-error table.
+**Alternatives:** Add a seventeenth diagnostic table; parse unstructured error messages at read time; return unbounded recent/version lists; use offset pagination or an in-memory error history.
+**Why:** Existing operational records already own the evidence. Derived views avoid duplicate persistence and preserve the reviewed schema scope while stable codes/cursors make debug output bounded and inspectable.
+**Trade-offs:** Recent-error reads merge candidates from two owners and job failures need a new code column. Messages remain unavailable to diagnostics, and sections/pages are operational views rather than one database snapshot.
+**Revisit if:** Required error evidence cannot be represented by the owning records or query measurements justify a separately maintained diagnostic projection.
+
+---

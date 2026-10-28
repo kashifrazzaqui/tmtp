@@ -58,7 +58,7 @@ export type HnItemType = "story" | "comment" | "job" | "poll" | "pollopt";
 
 export interface HnItem {
   id: StoryId;
-  type: HnItemType;
+  type?: HnItemType;
   author?: string;
   time?: number; // official API Unix seconds
   title?: string;
@@ -103,6 +103,8 @@ export type ArticleStatus = "pending" | "ready" | "failed";
 export interface Article {
   storyId: StoryId;
   status: ArticleStatus;
+  sourceContentVersion: string;
+  contentVersion: string;
   sourceUrl?: string;
   finalUrl?: string;
   title?: string;
@@ -117,6 +119,8 @@ export interface Article {
   errorCode?: string;
   errorMessage?: string;
 }
+
+export function articleContentVersion(article: Article | undefined): string;
 
 export interface ActivityEvent {
   id: ActivityId;
@@ -146,6 +150,8 @@ export interface ReadingSession {
   lastClientEventId: string;
 }
 ```
+
+`sourceContentVersion` records the exact `Story.contentVersion` used for the current extraction attempt and is independent of the derived output/input version. `articleContentVersion` is the single article-input identity used by scoring, storage, and queue activation. An absent article returns `"none"`. Pending/failed records hash only their status because their stale content is not a scoring input. A ready record hashes a fixed-order JSON projection of `{ status, title: title ?? null, byline: byline ?? null, excerpt: excerpt ?? null, contentHash, extractorVersion }`; the result is `"av1." + sha256(UTF8(JSON.stringify(projection)))` with lowercase hexadecimal output. Ready records require non-empty `contentHash` and `extractorVersion`. Every stored `Article.contentVersion` must equal `articleContentVersion(article)`. Raw article text, source/final URLs, errors, source story version, and timestamps do not enter the derived version because `contentHash` identifies extracted text, the story has its own version in recommendation identity, and the other fields identify the remaining prompt input.
 
 Activity is immutable after insertion. `clientEventId` is globally unique for idempotency. A session is a mutable projection and may be rebuilt from events. `original-page` and `hn-reconciliation` observations are always `partial`.
 
@@ -211,6 +217,7 @@ export interface Recommendation {
   storyId: StoryId;
   profileId: ProfileId;
   storyContentVersion: string;
+  articleContentVersion: string;
   promptVersion: string;
   model: string;
   score: number; // finite, 0..1
@@ -283,6 +290,7 @@ export interface Job {
   leaseExpiresAt?: IsoDateTime;
   attempts: number; // integer >= 0
   maxAttempts: number; // integer >= 1
+  lastErrorCode?: string;
   lastError?: string;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
@@ -340,8 +348,9 @@ export interface AccessSessionRecord {
 }
 
 export interface DiagnosticError {
+  id: string;
   code: string;
-  message: string;
+  message?: string;
   component: string;
   occurredAt: IsoDateTime;
   runId?: string;
@@ -384,6 +393,7 @@ export const JobSchema: import("zod").ZodType<Job>;
 export const IngestionRunSchema: import("zod").ZodType<IngestionRun>;
 export const LlmCallRecordSchema: import("zod").ZodType<LlmCallRecord>;
 export const AccessSessionRecordSchema: import("zod").ZodType<AccessSessionRecord>;
+export const DiagnosticErrorSchema: import("zod").ZodType<DiagnosticError>;
 export const RecommendationVersionCountSchema: import("zod").ZodType<RecommendationVersionCount>;
 ```
 
@@ -417,5 +427,7 @@ None.
 
 - Parse every valid record and reject invalid timestamps, unsafe IDs, unknown keys, invalid unions, NaN/infinite numbers, and broken state-field invariants.
 - Verify optional payload/version pairs and leased-job fields as paired values.
+- Verify type-less HN tombstones, ready-article requirements, and independent golden article-content versions for missing/pending/failed/ready records and every projected metadata change.
+- Verify recommendation identity includes the article version and diagnostic errors have stable IDs without requiring messages.
 - Verify blacklist/read history and immutable-record types remain distinct.
 - Round-trip every persisted record through its schema without changing meaning.

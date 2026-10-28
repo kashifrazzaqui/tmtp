@@ -28,9 +28,9 @@ Variable JSON is represented by parsed values plus schema versions. The domain v
 
 Activity events, profiles, and recommendations are immutable. Reading sessions and queue entries are rebuildable projections. HN account states are current observations and HN action intents are durable attempt records. Keeping these shapes separate prevents reconciliation from being mistaken for historical activity.
 
-### Opaque versions
+### Opaque versions and article-input identity
 
-The domain treats content, rules, activity, policy, builder, prompt, model, and rank versions as validated non-empty strings. Producers define canonicalization and hash algorithms. This keeps the domain free of crypto and policy dependencies while preserving exact version linkage.
+The domain treats story-content, rules, activity, policy, builder, prompt, model, and rank versions as validated non-empty strings. Their producers define canonicalization and hash algorithms. Article input is the one exception: `articleContentVersion` lives in domain because recommendations, queue, and reader-store must share exactly one identity rule. It uses only Node SHA-256 over the documented fixed-order projection; it does not import feature policy or expose raw article text. Type-less HN items remain valid raw tombstones so a refresh can preserve deletion evidence before story-specific normalization.
 
 ## Trade-offs
 
