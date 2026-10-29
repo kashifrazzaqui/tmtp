@@ -548,3 +548,12 @@
 **Revisit if:** Scheduling needs run-specific payload parameters or a different durable trigger abstraction with equivalent restart and idempotency guarantees.
 
 ---
+
+## 2026-10-29 — Complete mixed-version queue presentation
+**Chosen:** Reader-app discovers every queue rank version, orders the active group first and bootstrap last, hashes a canonical full manifest into its cursor, and pages each version with the existing single-version keyset. It also returns entry-aligned story/original-target details from one batch story read. The active projection pointer keeps routine ingestion in one namespace; the merge protects legacy or otherwise coexisting rows.
+**Alternatives:** Show only the active or newest version; merge scores across incompatible rank versions; hold cross-request database snapshots; infer a version from the current profile; issue one story-detail request per queue card.
+**Why:** A single-version page can silently hide pending or historical rows, while cross-version score comparison has no valid meaning. A complete manifest makes omissions and mid-pagination changes explicit, and batch story reads satisfy normal queue presentation without bypassing the facade.
+**Trade-offs:** Manifest discovery and hashing are O(queue size) per page, and ordering/filter changes require a fresh cursor. Page payloads include story summaries, but article bodies/explanations remain on the detail route. Canonical rows always include `state`, using null for unfiltered queries so spec/architecture hashes agree.
+**Revisit if:** A durable queue revision/manifest API can preserve identical completeness and change detection with sublinear page work, or mixed historical rank versions are formally eliminated.
+
+---
