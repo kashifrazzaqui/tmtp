@@ -27,7 +27,8 @@ export interface Logger {
 export interface CreateLoggerOptions {
   level: LogLevel;
   service: string;
-  secretValues: readonly string[];
+  secretValues?: readonly string[];
+  secretValuesProvider?: () => readonly string[];
 }
 
 export function createLogger(options: CreateLoggerOptions): Logger;
@@ -39,25 +40,26 @@ export const noopLogger: Logger;
 ## Construction and error behavior
 
 - `level` is required. The `logging.level` configuration schema applies the default `info`; the factory does not hide a second default.
-- `service` is trimmed and must be non-empty. The trimmed, redacted value is bound to every record.
-- `secretValues` is required so every caller explicitly chooses its secret-redaction set. The service passes every loaded access token, HN session cookie, LLM API key, and comparable raw secret; library tests and compositions with no secrets pass `[]`.
-- The factory copies `secretValues`. Empty strings are ignored because replacing an empty string is meaningless; all other strings, including whitespace, are treated literally. Later mutation of the caller's array does not change the logger or its children.
-- At runtime, an unknown level, blank/non-string service, or non-array/non-string-secret input throws `TypeError` with a fixed message that does not include the supplied option or a secret. The messages are respectively `Invalid log level.`, `Invalid service name.`, and `Invalid secret values.`
+- `service` is trimmed and must be non-empty. The trimmed value is bound to every normally serialized record after redaction with that record's secret inventory.
+- Exactly one of `secretValues` or `secretValuesProvider` is required; supplying both or neither is invalid. There is no default secret inventory. Static callers retain the existing `secretValues` behavior, and library tests and compositions with no secrets can continue to pass `secretValues: []`.
+- In static mode, the factory defensively snapshots `secretValues` at construction. Empty strings are ignored because replacing an empty string is meaningless; all other strings, including whitespace, are treated literally. Later mutation of the caller's array does not change the logger or its children.
+- In provider mode, `secretValuesProvider` is a service-owned, total, nonthrowing function that returns a plain array of the current raw string values. It must not expose lazy values or require the library to invoke secret-bearing getters. The service passes every currently active access token, HN session cookie, LLM API key, and comparable raw secret. The provider is called once for each enabled record at its serialization boundary, never at factory or child construction, and its returned array is defensively snapshotted for that record.
+- At runtime, an unknown level, blank/non-string service, both/neither secret-source selection, or invalid static secret input throws `TypeError` with a fixed message that does not include the supplied option or a secret. The messages are respectively `Invalid log level.`, `Invalid service name.`, and `Invalid secret values.`; the last message also covers an invalid provider function or secret-source combination. Provider results are validated at the record boundary as described below.
 - Pino/Node destination construction failures propagate. The factory does not write a startup record and does not log its options.
 
 ## Log records and level filtering
 
-Each accepted call writes one newline-delimited JSON object to file descriptor 1. Every record has:
+Each accepted call whose secret inventory is resolved successfully writes one newline-delimited JSON object to file descriptor 1. Every such record has:
 
 - `level`: the Pino numeric level — `trace=10`, `debug=20`, `info=30`, `warn=40`, `error=50`.
 - `time`: integer Unix epoch milliseconds supplied by Pino at call time.
-- `service`: the root service binding.
+- `service`: the root service binding, redacted with the same per-record inventory.
 - `msg`: the message after secret-value redaction. Percent signs have no interpolation meaning because the public API accepts no interpolation arguments.
 - Inherited child bindings and per-call fields as additional top-level properties.
 
 `pid` and `hostname` are not added. Newline delimiters are `\n`. No pretty printer, file rotation, worker transport, asynchronous buffer, or secondary destination is configured.
 
-The configured level is a minimum threshold: `error` emits only error, `warn` adds warn, `info` adds info, `debug` adds debug, and `trace` emits every public level. A suppressed call returns without writing and without traversing or serializing its fields. The level is fixed for the life of the root and all children.
+The configured level is a minimum threshold: `error` emits only error, `warn` adds warn, `info` adds info, `debug` adds debug, and `trace` emits every public level. A suppressed call returns without writing, calling the provider, or traversing or serializing its fields. The level is fixed for the life of the root and all children.
 
 The wrapper owns the reserved record keys `level`, `time`, `service`, `msg`, and the Pino control keys `serializers`, `formatters`, and `customLevels`. Reserved keys in per-call fields or child bindings are omitted, preventing callers from forging metadata or changing child behavior. Other keys are preserved subject to redaction and serialization. For an unreserved duplicate correlation key, a child binding overrides its ancestors and a per-call field overrides bindings; wrapper-owned metadata still wins.
 
@@ -66,6 +68,14 @@ Correlation fields use stable camelCase names, including `runId`, `jobId`, `stor
 ## Redaction and secret safety
 
 Redaction applies to messages, root service text, enumerable field names, child bindings, per-call fields, nested arrays/objects, and serialized errors at every enabled level. The replacement is always the literal string `[Redacted]`.
+
+### Secret inventory snapshots and provider failure
+
+Static mode uses the construction-time array snapshot for every record, preserving the existing immutable policy. Provider mode instead calls the provider once per enabled record, immediately before that record's outward serialization, and defensively copies the returned array before redacting any service text, message, key, or value. Empty strings are ignored. One copied inventory is used consistently across the entire record, including inherited bindings and errors, and is discarded when that record's serialization attempt settles. The library retains the provider function, not prior per-record inventories; a value removed from the service inventory is therefore not retained by the library for later records.
+
+The service can back the provider with a bounded registry of active-session secrets, adding values when sessions are issued and removing them on logout, revocation, or expiry. The service owns session lifecycle and registry bounds. The logging library neither discovers sessions nor expires them.
+
+Only the explicitly supplied provider function is invoked. The logger never calls arbitrary secret-bearing getters, and never writes the provider, its returned inventory, or its exception to a record. A provider throw or invalid result is a programmer error. The original record is not emitted, and the provider is not retried for that call. No startup/static baseline, empty inventory, last-known inventory, or partial result is used. Instead, logging writes exactly one fixed safe fallback record containing only numeric `level: 50`, the current integer epoch `time`, and `msg: "Redaction provider failed."`. It omits `service`, the original message, child bindings, per-call fields, provider results, and exception details because none can be safely redacted without the inventory. After that fallback write succeeds, the logging call throws a fixed `Error("Redaction provider failed.")` with no public `cause`, so the programmer error is not swallowed. A fallback destination failure follows the ordinary write-error contract.
 
 ### Sensitive-key redaction
 
@@ -86,7 +96,7 @@ After sensitive-key handling, every retained string key and string value is scan
 
 Object keys are redacted before insertion into the copied record. If two source keys produce the same sanitized key, the later property in JavaScript enumeration order wins. Reserved-key checks apply to the sanitized top-level key as well, so redaction cannot create a metadata override.
 
-Registration covers exact values only. URL-encoding, base64 encoding, hashing, or other transformations do not derive additional redaction entries. A secret that was not registered and appears under an innocuous key cannot be detected reliably. Therefore producers must never intentionally log raw secrets, must register every loaded secret with the root logger, and must use allowlisted non-secret request/response metadata rather than raw headers, credential-bearing URLs, or query strings. Paths to secret files are safe; their contents are not.
+Registration covers exact values only. URL-encoding, base64 encoding, hashing, or other transformations do not derive additional redaction entries. A secret absent from the applicable static or per-record provider snapshot and appearing under an innocuous key cannot be detected reliably. Therefore producers must never intentionally log raw secrets, must keep the chosen inventory complete and current, and must use allowlisted non-secret request/response metadata rather than raw headers, credential-bearing URLs, or query strings. Paths to secret files are safe; their contents are not.
 
 `debug.include_llm_payloads` does not relax logger redaction or authorize raw prompt/article logging. That option belongs to explicit diagnostics capture. Normal logs contain event and correlation metadata, not prompt bodies, profile payloads, article content, cookies, tokens, API keys, or secret-file values.
 
@@ -109,7 +119,7 @@ If a destination failure occurs after a partial write, the destination may conta
 
 ## Child loggers and `noopLogger`
 
-`child(fields)` sanitizes and binds a copy of `fields`, returns a logger with the same destination, fixed level, service, and secret set, and emits no record of its own. Child creation does not mutate the parent or sibling loggers. Children may be created from children; normal field precedence follows the record rules above.
+`child(fields)` safely copies and binds `fields`, returns a logger with the same destination, fixed level, service, and chosen secret source, and emits no record of its own. Child creation does not call a secret provider or mutate the parent or sibling loggers. Registered-value redaction of bindings uses each eventual record's applicable inventory, so provider-backed children also redact later-issued secrets. Children may be created from children; normal field precedence follows the record rules above.
 
 `noopLogger` implements every method, including `trace`, as a no-op. It performs no serialization or I/O, and `child` returns `noopLogger` itself. It is suitable for optional logging and isolated unit tests, but it cannot substitute for real-output redaction tests.
 
@@ -117,18 +127,19 @@ If a destination failure occurs after a partial write, the destination may conta
 
 A root logger passes Pino an internal synchronous stdout stream. Its `write` loops over `fs.writeSync(1, buffer)` until the complete UTF-8 record is written and propagates all errors, including `EPIPE`. Once an enabled method returns normally, the complete record has been written; no asynchronous flush remains. The library opens no file descriptor and owns no timer, worker, or close operation. The process owns stdout, and the logging package never closes it. The service's synchronous-log shutdown step therefore has no buffered transport to drain.
 
-Children share the root destination and immutable policy. Calls on the Node event loop emit whole NDJSON lines in call order. The package provides no ordering or atomicity guarantee across multiple Node workers or processes and no backpressure queue beyond the synchronous destination's behavior.
+Children share the root destination and immutable configuration. Static secrets are immutable per root; provider-backed secrets are resolved into independent per-record snapshots. Calls on the Node event loop emit whole NDJSON lines in call order. The package provides no ordering or atomicity guarantee across multiple Node workers or processes and no backpressure queue beyond the synchronous destination's behavior.
 
-If the service adds configuration reload, it creates a new root with the new level and complete new secret set, then replaces logger-dependent composition atomically. Old roots and children retain their old immutable policy until discarded; reload does not mutate them. The service must stop using old children after the swap so retired secrets and new secrets cannot receive the wrong policy. This package does not itself provide or schedule that lifecycle.
+Runtime secret issuance does not require root replacement when the service uses a provider. If the service adds other configuration reload, it creates a new root with the new level and chosen secret source, then replaces logger-dependent composition atomically. Old static roots retain their construction-time inventory. Provider-backed roots continue to call the service-owned provider until discarded, so the service must stop using old children after the swap and must keep or retire their provider explicitly. This package does not itself provide or schedule that lifecycle.
 
 ## Invariants
 
-1. Every enabled call that returns normally has emitted one complete valid single-line JSON record with wrapper-owned level, time, service, and message metadata; a level-suppressed call emits nothing, and failed writes may leave a partial final line but never report success.
+1. Every enabled call with a valid inventory that returns normally has emitted one complete valid single-line JSON record with wrapper-owned level, time, service, and message metadata. A level-suppressed call emits nothing; a provider failure emits only the documented fixed fallback and throws a fixed safe error; failed writes may leave a partial final line but never report success.
 2. No Pino type or object is required by consumers, and no caller can disable or replace the fixed redaction policy.
-3. Sensitive keys and registered secrets in field names or values are redacted from every enabled record, including children and errors; filtered calls do no field work.
+3. Sensitive keys and secrets from the applicable static or per-record provider snapshot are redacted from field names and values in every normally emitted record, including children and errors; filtered calls do no provider or field work.
 4. Child context is additive and immutable from the parent's perspective; correlation keys retain their documented names.
 5. Real logging is synchronous stdout with no asynchronous shutdown state; `noopLogger` has no side effects.
 6. Redaction is defense in depth, not permission to log secrets or payloads. Producers remain responsible for allowlisted metadata and complete secret registration.
+7. Exactly one secret source is selected. Static arrays are retained as construction snapshots; provider arrays are independent per-record snapshots, and removed provider values are not retained for later records.
 
 ## Acceptance-focused test expectations
 
@@ -136,7 +147,10 @@ If the service adds configuration reload, it creates a new root with the new lev
 - Assert trimmed service binding, epoch time, no default pid/hostname, omission of every reserved/control key, and parent/child/per-call precedence for correlation fields.
 - Cover every sensitive-key spelling family at root and in nested objects, arrays, and HTTP-style headers. Assert the whole value becomes `[Redacted]` while `*_path` fields and correlation IDs remain visible.
 - Register multiple secret sentinels, including overlapping values and values containing JSON-significant characters. Assert none occurs in raw output from messages, service text, field names, field values, children, errors, causes, or stacks; assert exact placeholder behavior, deterministic collisions between redacted keys, and no replacement of the empty string.
-- Verify copied secret options, fixed safe construction errors, propagation of destination failures, and that invalid options never echo the supplied secret.
+- Verify exactly-one secret-source validation, copied static secret options, fixed safe construction errors, propagation of destination failures, and that invalid options never echo the supplied secret. Prove existing static callers, including `secretValues: []`, retain their prior redaction and mutation-isolation behavior without any provider calls.
+- With a provider, issue a new secret sentinel after logger and child construction and assert the next record redacts it everywhere the redaction policy applies. Assert exactly one provider call per enabled record, no call for suppressed records or child creation, and one consistent per-record snapshot even when the provider reuses and later mutates its source array.
+- Remove a provider-backed sentinel after a record settles and assert subsequent records use only the new inventory. Inspect the internal per-record inventory lifecycle to prove the removed value and old snapshot are not retained by the root, children, or serializer; an output-only assertion is not sufficient to prove non-retention.
+- Make the provider throw and return invalid arrays in separate cases. Assert no original record or original `service`, message, bindings, fields, provider values, or exception text escapes; assert exactly one exact fallback record followed by the fixed safe thrown error, with no provider retry. Also cover fallback destination failure.
 - Serialize errors under the exact key `err` and other keys, in per-call fields and child bindings, with nested causes, safe codes, custom secret-bearing properties, cycles, bigints, non-finite numbers, dates, unsupported class instances, accessors, and custom `toJSON`; assert the complete emitted error object has only the documented safe shape and inputs are unchanged.
 - Prove child loggers retain parent context without mutating siblings, share redaction and level policy, and produce independent complete lines during interleaved calls.
 - Assert every `noopLogger` method is silent and `child` returns the singleton.

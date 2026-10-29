@@ -4,7 +4,7 @@
 
 Implement `spec.md` as a tier-2, transport-free, read-only composition over `reader-store` and `job-queue`. The package turns operational records into small safe DTOs; it is not a general serialization or observability framework.
 
-The composition root supplies a fully migrated store, a queue on the same service database, time primitives, resolved debug policy, and the complete loaded-secret set. The service retains every responsibility that involves a socket, process lifecycle, configuration loading, access control, migrations, probes, workers, or LLM execution.
+The composition root supplies a fully migrated store, a queue on the same service database, time primitives, resolved debug policy, and exactly one secret source: a static loaded-secret array or a service-owned current-value provider. The service retains every responsibility that involves a socket, process lifecycle, configuration loading, access control, migrations, probes, workers, session expiry, or LLM execution.
 
 ## Internal decomposition
 
@@ -15,7 +15,7 @@ A minimal implementation can use these private modules with one public barrel:
 | `health` | Liveness, required-check aggregation, local/external capability projection | Probes, network calls, SQLite access |
 | `debug-dto` | Explicit record-to-DTO mappers and safe-code normalization | Domain-record pass-through or arbitrary keys |
 | `pages` | Query validation, deterministic read planning, cursor codec | Offset pagination or transport encoding |
-| `redaction` | Secret replacement, sensitive-key handling, URL/error suppression, string bounds | Public logging API or configurable bypass |
+| `redaction` | Static/per-unit secret snapshots, secret replacement, sensitive-key handling, URL/error suppression, string bounds | Public logging API, session registry ownership, or configurable bypass |
 | `payloads` | JSON-only preview, visibility states, per-value and per-snapshot budgets | Audit capture or persistence |
 | `snapshot` | Fixed-order section reads, failure isolation, snapshot metadata | Cross-section consistency claim |
 | `stream` | Async iteration, sequence numbers, delay, cancellation, cleanup | HTTP, SSE framing, replay, heartbeat |
@@ -35,10 +35,18 @@ Service startup/probes/worker state
              v
      health aggregation --------> liveness/readiness/capabilities DTOs
 
-ReaderStore + JobQueue read models
+debugSnapshot / one debugStream frame
              |
              v
     validated bounded query plan
+             |
+             v
+ resolve/copy one static or provider inventory for the unit
+             |
+     provider failure? ---- yes ----> fixed safe error; no snapshot/frame
+             | no
+             v
+ReaderStore + JobQueue read models
              |
              v
   raw domain records (private) ---> allowlisted DTO mappers
@@ -91,7 +99,7 @@ A failed fresh-article capability says nothing about cached article availability
 One snapshot follows this order:
 
 1. Validate debug policy and every query/cursor before any read.
-2. Capture `generatedAt` once and create a fresh 32 KiB included-payload budget.
+2. Capture `generatedAt` once, resolve and defensively copy one secret inventory for the complete snapshot, and create a fresh 32 KiB included-payload budget. Static mode reuses its construction snapshot; provider mode calls the provider exactly once here. A provider failure aborts the whole snapshot before any DTO escapes.
 3. Read sections in the documented fixed order with bounded queries.
 4. Map each raw record through its own explicit DTO mapper.
 5. Normalize codes and bound copied strings. For LLM payloads, apply visibility, recursive sanitization, and the shared budget.
@@ -163,8 +171,8 @@ For each `next()`:
 1. If settled, return done.
 2. For sequence 1, take the immediate snapshot. Otherwise use `clock.monotonicNowMs()` to await only the remaining configured delay from the previous snapshot's completion. A late pull proceeds immediately rather than creating a catch-up frame.
 3. Link the caller signal and iterator-return cancellation to the sleep. Do not merge unrelated streams or use a global timer.
-4. Take one first-page snapshot and return `{sequence, snapshot}`.
-5. Increment sequence only for an emitted frame.
+4. Take one first-page snapshot and return `{sequence, snapshot}`. The snapshot pipeline's single provider resolution is the frame's only provider call; do not resolve again at the frame boundary.
+5. Increment sequence only for an emitted frame. A provider failure rejects the pull with the fixed safe error, returns no frame, consumes no sequence number, and is not retried automatically.
 
 An async iterator naturally applies pull backpressure: work for a later frame does not start while the consumer has not requested it. If an implementation chooses to schedule the next wait after yielding, it must still prove that a paused consumer cannot accumulate frames or overlap reads. The simplest implementation performs work only in `next()` and remembers the prior completion time.
 
@@ -197,9 +205,13 @@ The URL scanner recognizes absolute scheme URLs and protocol-relative URL tokens
 
 ### Registered secrets
 
-The factory snapshots `secretValues`, discarding only empty strings. Sorting by descending length provides longest-match-first replacement, with original order as a deterministic tie-breaker for equal-length values. Replacement runs on keys and string values before output truncation. It does not recursively scan `[Redacted]`.
+The factory accepts exactly one of `secretValues` and `secretValuesProvider`. Static mode defensively snapshots `secretValues` at construction, preserving existing caller behavior. Provider mode calls the service-owned function once per complete one-shot snapshot or stream frame and defensively snapshots its plain string array for that unit. Both modes discard only empty strings. Sorting each applicable inventory by descending length provides longest-match-first replacement, with original order as a deterministic tie-breaker for equal-length values. Replacement runs on keys and string values before output truncation. It does not recursively scan `[Redacted]`.
 
-The service must construct logging and diagnostics from the same loaded-secret inventory. The two packages enforce different output boundaries and do not share a runtime redactor: logging is tier 0 with no exported sanitizer, while diagnostics is tier 2 and must not gain a logging dependency merely to reuse private code.
+The same per-unit inventory covers all DTO strings, cursors, keys, and payload previews. It is discarded when serialization settles; the diagnostics instance and stream retain only the provider function, never previous provider arrays. A service can maintain a bounded active-session registry behind the provider, adding values on issuance and removing them on logout, revocation, or expiry. The library owns neither that registry nor session expiry. The provider must be total and nonthrowing, and no arbitrary secret-bearing getter is invoked.
+
+The service must construct logging and diagnostics from equivalent current secret inventories, whether static or provider-backed. The two packages enforce different output boundaries and do not share a runtime redactor: logging is tier 0 with no exported sanitizer, while diagnostics is tier 2 and must not gain a logging dependency merely to reuse private code.
+
+A provider throw or invalid result is a programmer error and fails closed. Do not substitute a startup/static baseline, empty set, last-known inventory, or partial array. The snapshot/frame boundary throws the fixed `DiagnosticsError` code `redaction-provider-failed`, with no public cause, provider values, or provider exception text. This is a whole-unit failure, not an unavailable section, and no raw or partial DTO escapes. Provider mode leaves every allowlist, no-debug-content rule, payload visibility state, and budget unchanged.
 
 Exact-value replacement cannot discover an unregistered or transformed secret. The producer-side no-secret rule remains mandatory, especially for prompts and provider output.
 
@@ -217,17 +229,19 @@ Validation failures use `DiagnosticsError` with a fixed message table. No messag
 
 Debug section failures are values, not exceptions. The section mapper catches expected repository/queue read and projection failures at the section boundary, records only `read-failed`, and continues. Validation still happens before this boundary, so an invalid caller query never becomes a partial snapshot.
 
+Secret-provider failures occur at the whole-snapshot boundary, outside section fault isolation. They use the fixed `redaction-provider-failed` mapping and cannot become `read-failed`, a partial snapshot, or a stream frame. The original provider exception is never exposed as a public cause.
+
 Implementation defects that violate pure internal invariants should fail tests rather than be converted into plausible health. Any catch at the section boundary must be narrow enough not to hide diagnostics programming errors; upstream `DatabaseError`, store errors, and documented decode failures are operational inputs, while an undefined internal mapper is not.
 
 Cancellation remains separate from operational failure. The service must not turn an abort reason into a debug error DTO.
 
 ## Concurrency and ownership
 
-- Construction copies options, secret arrays, and query-facing policy. Do not retain caller-owned mutable arrays.
+- Construction copies options, static secret arrays, and query-facing policy. Do not retain caller-owned mutable static arrays. Provider arrays are copied once per snapshot/frame and released when that unit settles; old dynamic inventories are not retained.
 - Each call allocates its DTOs, page objects, cursors, and payload budget. No mutable record is shared with a repository result or another caller.
 - Each stream owns sequence and cancellation state. There is no global timer, async-local context, replay cache, or snapshot singleton.
 - Store and queue calls are synchronous. Fixed section order and bounded row counts make event-loop cost predictable, although large stored payload parsing remains an upstream cost before output sanitization.
-- Configuration reload, if added by the service, constructs a replacement diagnostics instance. The service closes old streams and stops using the old instance; the library does not mutate live policy.
+- Runtime secret issuance and removal can flow through a provider without changing diagnostics configuration. Other configuration reload, if added by the service, constructs a replacement diagnostics instance. The service closes old streams, stops using the old instance, and explicitly retires any provider it references; the library does not mutate live policy.
 - Shutdown belongs to the service. It closes client connections, calls iterator `return()`, stops workers, and then closes SQLite in that order.
 
 ## Dependency use
@@ -249,14 +263,14 @@ No import from `logging` or `llm-interface` is needed. No Fastify, SSE, Pino, Op
 - **Local redaction versus a new shared package:** some policy vocabulary is duplicated with logging, but the dependency tiers remain intact and each output gets an allowlist designed for its risks.
 - **Suppressed error responses versus maximum detail:** failed provider payloads are unavailable for inspection, but arbitrary provider error text cannot bypass the no-message rule. Stable codes, request hashes, and successful captured payloads remain available.
 - **Whole-value size omission versus string slicing:** large payloads are less inspectable, but output remains valid JSON and explicit about omission.
-- **Immutable policy versus live toggling:** the service must replace composition and close streams, while concurrent readers never observe partially changed capture or secret policy.
+- **Immutable configuration versus live secret inventories:** static mode retains construction-time behavior, while provider mode deliberately refreshes only the secret inventory at unit boundaries. Other policy changes still require replacement composition and closed streams, and one snapshot/frame never observes a partially changed inventory.
 
 ## Testing seams
 
 Use the public API for behavior tests and pure private units for exhaustive edge tables.
 
 - Health needs no database: scripted inputs cover every readiness/capability combination.
-- Mapper and sanitizer tests use secret sentinels, hostile keys, URL tokens, malformed JSON values, deep/nested structures, and oversized strings. Assert serialized output, not only object inspection.
+- Mapper and sanitizer tests use secret sentinels, hostile keys, URL tokens, malformed JSON values, deep/nested structures, and oversized strings. Assert serialized output, not only object inspection. Add provider cases for later-issued secrets, removed-secret non-retention, one call and one consistent snapshot per snapshot/frame, unchanged static behavior, and fixed fail-closed errors with no partial output. Use internal inventory-lifecycle assertions for non-retention because output alone cannot prove it.
 - Cursor tests use golden version-1 envelopes, malformed/trailing data, wrong sections/filters, overlong keys, and records around equal timestamps.
 - Repository integration tests use real SQLite and real `reader-store`/`job-queue` reads once their required page APIs exist. Mocks are sufficient for section-failure isolation, not for ordering proof.
 - Stream tests combine `createFixedClock` with a scripted `Sleep`; they do not use real waits. Hold consumer pulls and sleep promises to observe late-pull timing, concurrent `next()` serialization, backpressure, abort, return, and cleanup.

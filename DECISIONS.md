@@ -557,3 +557,57 @@
 **Revisit if:** A durable queue revision/manifest API can preserve identical completeness and change detection with sublinear page work, or mixed historical rank versions are formally eliminated.
 
 ---
+
+## 2026-10-29 — Config-owned schema builder export
+**Chosen:** Re-export Zod's `z` value from `@tmtp/config` so the service builds its strict synchronous schema through an existing declared dependency.
+**Alternatives:** Add a direct service Zod dependency despite the no-new-edges constraint; build a second schema-composition API; write a parallel service validator.
+**Why:** The service already delegates safe parsing to config. Reusing its one Zod dependency avoids an undeclared transitive import and preserves the exact `safeParse` and safe-issue boundary without moving product keys into config.
+**Trade-offs:** Config now has a small third-party runtime surface rather than only parser functions. Consumers must still obey the synchronous/static-path contract; no product schema registry or loader is added.
+**Revisit if:** Schema construction needs a narrower abstraction or the dependency policy explicitly permits a direct service Zod edge.
+
+---
+
+## 2026-10-29 — Stable migration failure reasons
+**Chosen:** Add `DatabaseError.migrationReason` with checksum, ordering, definition, and SQL-failure categories. Readiness maps the recorded `migrate` result and does not inspect the ledger again.
+**Alternatives:** Match raw error messages; report every migration failure identically; add a second migration inspector and checksum implementation.
+**Why:** Checksum mismatch is a distinct operational failure and must be classified without unsafe text matching or duplicate migration logic.
+**Trade-offs:** Database errors carry one more optional safe field, and migration tests must pin every category. Other migration failures still share the public `migration-failed` readiness reason.
+**Revisit if:** Operators need more detailed safe migration diagnostics or a separately justified read-only migration status API.
+
+---
+
+## 2026-10-29 — Dynamic runtime secret redaction
+**Chosen:** Let logging and diagnostics accept a `secretValuesProvider` consulted once per emitted record/snapshot/frame. The service registry holds startup secrets and active session/CSRF values, removes them on logout, and prunes them at expiry.
+**Alternatives:** Guarantee redaction only for startup secrets; rebuild the object graph on every login; retain every issued secret forever in a static array.
+**Why:** Access-control issues secrets after logger and diagnostics construction. A shared current provider closes that gap without disrupting resources or creating unbounded historical retention.
+**Trade-offs:** Active raw session values remain in service memory until logout/expiry pruning, and the provider must be total and fail closed. Expiry pruning occurs at provider snapshots, so expired values may remain between snapshots rather than under a continuous active-only bound. The registry is redaction-only and cannot recover browser CSRF state.
+**Revisit if:** Secret ownership moves into a shared session lifecycle abstraction with equivalent bounded retention and per-output consistency.
+
+---
+
+## 2026-10-29 — Explicit claim outcomes
+**Chosen:** `JobQueue.claim` returns leased, rejected, or idle. Rejected includes the fresh terminally failed invalid-payload job, leaves attempts unchanged, and never reaches a handler.
+**Alternatives:** Keep returning undefined for both idle and poison rejection; throw an ambiguous queue error; skip poison jobs internally until a valid one is found.
+**Why:** Run-once must distinguish an empty queue from a committed poison transition without unrelated history queries. One result per selected job keeps claims bounded and preserves the meaning of handler attempts.
+**Trade-offs:** Every worker must handle the rejected branch, and run-once has another outcome/CLI exit. Polling treats rejection as contained work rather than infrastructure failure.
+**Revisit if:** Claim needs a richer batch result while retaining bounded work and explicit poison visibility.
+
+---
+
+## 2026-10-29 — Process-wide LLM transport cleanup
+**Chosen:** Keep the OpenAI-compatible adapter without a fake `close()` method. Cancel and drain every admitted operation, discard the adapter, and use process exit to release the SDK's process-wide fetch dispatcher.
+**Alternatives:** Claim per-client socket closure that the pinned SDK does not provide; add a private dispatcher and new dependency solely for disposal; close global transport while other users may still run.
+**Why:** Inspection of OpenAI `7.45.1` shows no main-client close API, and the adapter creates no private Agent. Settled generation already cleans up attempt timers/signals and starts no later work, so the honest ownership boundary is process-wide transport, not adapter-owned sockets.
+**Trade-offs:** There is no deterministic per-adapter socket-close guarantee before process exit. Clean CLI/service shutdown must actually exit after resource cleanup, and tests must not claim otherwise.
+**Revisit if:** The adapter gains an owned dispatcher with a verified close hook or the pinned SDK exposes supported per-client disposal.
+
+---
+
+## 2026-10-29 — One LLM audit writer for scoring and probes
+**Chosen:** Expose `personalization.persistLlmAudits` for already-settled provider results and use it for service connection checks. It delegates to the same private audit writer as scoring and readable scoring errors.
+**Alternatives:** Copy the audit-to-domain mapping into the service; add an LLM-adapter persistence method; give reader-store a new dependency on LLM interface types.
+**Why:** Personalization already owns audit mapping, first-observation timestamps, immutable reuse, and conflict handling. Reusing that owner avoids drift while keeping provider and storage package boundaries unchanged.
+**Trade-offs:** The personalization facade gains one narrow public method. Probe writes use a short independent transaction without the profile mutex and perform no recommendation, profile, queue, or job work.
+**Revisit if:** Audit persistence moves to a shared owner with equivalent validation, immutable reuse, and transaction semantics.
+
+---

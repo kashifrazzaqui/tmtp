@@ -4,7 +4,7 @@
 
 - `connection`: validates `DatabaseConfig`, constructs the native connection, applies and verifies pragmas, and owns close state.
 - `statements`: prepares single-statement queries/updates, binds positional values, reads all rows, and enforces `queryOne` cardinality.
-- `migrations`: validates IDs, sorts work, computes SHA-256 checksums, bootstraps the ledger, and executes each migration with its ledger row.
+- `migrations`: validates definitions and IDs, sorts work, computes SHA-256 checksums, bootstraps the ledger, executes each migration with its ledger row, and assigns stable failure reasons.
 - `transactions`: tracks nested depth and delegates to native transaction/savepoint behavior.
 - `errors`: maps known driver error codes to stable safe categories while retaining `cause` for local debugging.
 
@@ -18,7 +18,17 @@ Construction is synchronous because `better-sqlite3` is synchronous and service 
 
 ## Migration design
 
-Migration IDs form one global lexical sequence across owning packages. The service concatenates arrays, and `migrate` performs duplicate/order validation before applying anything. A migration is a string rather than a callback so its exact bytes can be hashed and reviewed. Each migration runs in its own transaction, including its ledger insert.
+Migration IDs form one global lexical sequence across owning packages. The service concatenates arrays. A migration is a string rather than a callback so its exact bytes can be hashed and reviewed.
+
+The migration flow is:
+
+1. Validate every definition, ID, and duplicate ID before changing the schema. Malformed definitions or IDs and duplicate definitions fail with `invalid-migration`.
+2. Bootstrap and read the ledger, then classify supplied migrations as applied or pending. Ledger and transaction failures use `sql-failed`.
+3. Compare each applied migration's ledger checksum with the SHA-256 checksum of its exact SQL bytes. A difference fails with `checksum-mismatch` before any pending migration runs.
+4. Require every pending ID to sort after the greatest applied ID. An ordering failure uses `invalid-order`; this reason has no other meaning.
+5. Execute each pending migration and its ledger insert in one transaction. SQL, ledger, or transaction failure uses `sql-failed`; earlier migrations remain committed, the failing migration and its ledger insert roll back, and a later call can resume.
+
+Definition, ordering, and checksum validation never repair or edit applied migrations. Each failure retains `migrationId` when known and applicable.
 
 Checksum mismatches are fatal and never auto-repaired. Down migrations and automatic schema diffing are intentionally absent; backups and forward migrations are the recovery model.
 
@@ -30,7 +40,9 @@ Transactions contain only CPU-bound SQL and pure mapping. No retry loop, logging
 
 ## Error design
 
-The adapter inspects driver codes rather than matching human-readable messages where possible. SQL text may appear in a local cause for development, but normalized messages exclude bound parameters. Migration errors add `migrationId`. Retryable means only that a caller may reconsider the operation; the database never decides that a write is safe to repeat.
+The adapter inspects driver codes rather than matching human-readable messages where possible. SQL text may appear in a local cause for development, but normalized messages exclude bound parameters. The migration flow assigns `migrationReason` at the failure point using the exact mapping in `spec.md`; error normalization preserves that reason rather than inferring it from a message. Every `code="migration"` error carries a reason and is nonretryable, while every other code omits the property. Migration errors also retain `migrationId` where known and applicable. Stable metadata contains no SQL text, SQL parameter values, or raw driver messages.
+
+Service readiness consumes the recorded startup `migrate` result and branches on `migrationReason`, so checksum mismatch needs no message matching. The service does not query the ledger or recalculate checksums for readiness: `migrate` remains the only ledger implementation, and the public barrel exposes no migration inspector. Retryable means only that a caller may reconsider the operation; the database never decides that a write is safe to repeat.
 
 ## Trade-offs
 

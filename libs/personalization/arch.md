@@ -177,6 +177,8 @@ Equivalence excludes only the composition-owned `createdAt`. Payload/version pai
 
 The design does not duplicate a batched call once per story. Many recommendations may reference one final successful audit; every failed earlier attempt remains a separate row.
 
+The same private audit writer serves the public `persistLlmAudits` boundary used by service connection-check probes. That boundary validates the supplied dense audit array, returns immediately for an empty stream, and otherwise opens one short transaction with one observation timestamp. It does not acquire the profile mutex or write judgments/failures/projections/jobs. Scoring passes an already-open result transaction to the writer, while standalone probes let it open the transaction; neither path has a second audit-to-domain mapper. Duplicate/conflicting IDs follow the same rollback and safe-error rules.
+
 ### 4. Insert or reuse judgments
 
 For each returned recommendation, query by deterministic ID. An absent record is inserted unchanged after verifying that its `llmCallId` resolves to a stored success audit. Do not replace it with the last audit in the overall run: different batches have different final successes.
@@ -286,6 +288,7 @@ The package does not render rationale/evidence, follow model-provided URLs, invo
 - **Lock across external await versus shorter critical sections.** Holding the in-memory lock is necessary for profile order; holding a SQL transaction would be harmful and is forbidden. Activity/ingestion remain outside the lock to preserve reading and collection responsiveness.
 - **Complete in-memory rank versus incremental ranking.** Complete assembly costs memory and a larger synchronous transaction, but it is the only way to preserve one exploration pool, one rank version, and complete queue retention with the existing pure API.
 - **First-observed audit time versus fabricated attempt time.** Persistence time is coarse but honest. Exact per-attempt chronology requires an upstream timestamp field.
+- **One public audit writer versus service-side probe mapping.** Connection checks reuse personalization's audit persistence instead of copying its mapping and conflict rules. Probe writes stay independent of the profile mutex and perform no ranking or judgment work.
 - **Reuse existing judgment links versus rewrite to latest retry.** Preserving original `createdAt`/final-success link keeps explanations immutable. New retry audits remain available even when the compatible existing recommendation is reused.
 - **Current-content failure check versus blocking content writers.** Rechecking after the external call allows ingestion/extraction to continue and avoids attaching old failures to new content. It requires keeping version fingerprints in the plan.
 - **Stale job no-op versus executing payload history.** Current-profile execution avoids old ranks and unbounded historical reconstruction. Source/profile payloads are logical work identities, not snapshots for replay.
@@ -300,7 +303,7 @@ Test layers are:
 1. **Codec/API unit tests:** exact exports, strict payload/version validation, canonical dedupe keys, options/errors, abort validation, and safe job-failure mapping.
 2. **Activity integration tests:** complete replay reads, terminal latest session, append-count rollback, multi-session upserts, novel-only jobs, and concurrent duplicates.
 3. **Profile integration tests:** latest window plus independent version at zero/nonzero budgets, referenced-story validation, immutable reuse, durable current-pointer selection, successful historical reversion across restart, preference rollback, and immediate complete blacklist projection.
-4. **Scoring integration tests:** exact articles/at/signal arguments, audits-before-recommendations, per-batch final-success linkage, timestamp reuse, `RecommendationError.attempts`, current-content failure checks, and no scored `markEvaluation` call.
+4. **Scoring/audit integration tests:** exact articles/at/signal arguments, audits-before-recommendations, per-batch final-success linkage, timestamp reuse, `RecommendationError.attempts`, current-content failure checks, and no scored `markEvaluation` call. Exercise standalone connection-check streams through `persistLlmAudits`, including empty/malformed/conflicting inputs, first-observation reuse, one transaction, no mutex wait, and no unrelated writes.
 5. **Projection golden/integration tests:** more stories than two batch sizes, exact article/blacklist/existing/at inputs, one rank version, complete pending/failed/history retention, and rollback across every result write.
 6. **Cancellation/concurrency tests:** pre-abort, lock-wait abort, mid-call partial commit, no unattempted failures, stale-job no-op, and old/new profile ordering across a held provider Promise.
 7. **Restart tests:** close/reopen SQLite around every commit boundary, recover real expired leases, rerun handlers, and assert logical counts plus original timestamps/call links remain stable.

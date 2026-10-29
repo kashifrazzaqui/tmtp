@@ -5,7 +5,7 @@
 The package is divided by safety responsibility rather than by log level:
 
 - `logger`: implements the public `Logger` façade, immutable level/service policy, per-call fields, and child creation.
-- `redaction`: owns normalized sensitive-key matching, the copied secret-value set, longest-match literal replacement, and reserved-key filtering.
+- `redaction`: owns normalized sensitive-key matching, the static or per-record secret-value snapshot, longest-match literal replacement, and reserved-key filtering.
 - `serialization`: copies supported values, handles cycles and unsupported values, and converts errors to their allowlisted shape.
 - `pino-adapter`: constructs the Pino 10 logger, applies fixed record/redaction options, checks enabled levels, and writes to the selected internal destination.
 - `noop`: supplies the singleton no-op implementation.
@@ -21,34 +21,39 @@ Logger.level(message, fields)
    Pino isLevelEnabled(level)?
        | no             | yes
        v                v
-    return      omit reserved keys
+    return      resolve/copy this record's secret inventory once
                      |
-                     v
-     reserved/sensitive-key handling at any depth
-                     |
-                     v
-  safe value/error copy + secret replacement in keys/strings
-                     |
-                     v
-       Pino fixed-path redaction as backstop
-                     |
-                     v
-       epoch time + numeric level + service/msg
-                     |
-                     v
-          synchronous NDJSON write to stdout
+             provider failure?
+               | yes         | no
+               v             v
+     fixed safe fallback    omit reserved keys
+     + fixed thrown Error          |
+                                   v
+            reserved/sensitive-key handling at any depth
+                                   |
+                                   v
+            safe value/error copy + secret replacement in keys/strings
+                                   |
+                                   v
+                  Pino fixed-path redaction as backstop
+                                   |
+                                   v
+                  epoch time + numeric level + service/msg
+                                   |
+                                   v
+                       synchronous NDJSON write to stdout
 ```
 
-The level check comes first so a disabled debug/trace call does not allocate sanitized copies or touch field accessors. The wrapper calls Pino with at most `(sanitizedFields, sanitizedMessage)`; it never forwards variadic interpolation arguments. Reserved fields are removed before Pino merges the object, and `base: { service }` replaces Pino's default pid/hostname bindings.
+The level check comes first so a disabled debug/trace call does not call the provider, allocate sanitized copies, or touch field accessors. Static mode selects the construction-time snapshot; provider mode calls the provider once and immediately copies its plain string array. That one inventory is shared by service, message, binding, field, and error redaction for the record. The wrapper calls Pino with at most `(sanitizedFields, sanitizedMessage)`; it never forwards variadic interpolation arguments. Reserved fields are removed before Pino merges the object, and wrapper-managed `base` metadata replaces Pino's default pid/hostname bindings.
 
-Child creation follows the same sanitization path for bindings and delegates to `pino.child` without child options. Omitting `level`, `serializers`, `formatters`, and `customLevels` is therefore security-relevant: Pino treats those binding keys specially or drops them. The wrapper retains the fixed level and immutable secret set itself and does not expose Pino's mutable level accessor.
+Child creation safely copies bindings and delegates to `pino.child` without child options or a provider call. Omitting `level`, `serializers`, `formatters`, and `customLevels` is therefore security-relevant: Pino treats those binding keys specially or drops them. Provider-backed registered-value redaction of copied bindings occurs at each record boundary, not only at child creation. The wrapper retains the fixed level and chosen secret source itself and does not expose Pino's mutable level accessor.
 
 ## Pino configuration and lifecycle
 
 Production construction uses:
 
 - the configured standard level and Pino's standard numeric level labels;
-- `base: { service }`, `messageKey: "msg"`, and `pino.stdTimeFunctions.epochTime`;
+- wrapper-managed `base` service metadata, `messageKey: "msg"`, and `pino.stdTimeFunctions.epochTime`; provider mode supplies the service value only after redacting it with the current record inventory;
 - an internal `DestinationStream` whose `write` loops over `fs.writeSync(1, buffer)` until all UTF-8 bytes are written;
 - `serializers: { err: identity }`, preventing Pino's default error serializer from changing the wrapper's allowlisted error object;
 - a fixed `redact` list for top-level secrets and common HTTP-header paths, with `[Redacted]` censorship as a backstop;
@@ -66,13 +71,17 @@ Only plain objects, arrays, dates, errors, and supported primitives survive the 
 
 Errors use an allowlist instead of Pino's general error shape. `name`, `message`, `stack`, safe `code`, and `cause` are useful diagnostics; arbitrary own properties are not. Standard fields are found through data-property descriptors along the prototype chain, never through accessors. The identity `err` serializer installed in Pino is essential: otherwise Pino's default serializer would add fields and flatten causes after the safe copy. Consumers must log safe structured details, such as configuration issues, separately rather than expecting every custom error property to appear.
 
-Secret values are immutable per root and shared by its children. Exact-value matching cannot infer encoded or encrypted representations, so the adapter boundary remains important: HTTP clients and other producers must project allowlisted metadata instead of passing raw requests, responses, URLs with credentials/query strings, or secret-bearing payloads.
+Static secret values are immutable per root and shared by its children. Exact-value matching cannot infer encoded or encrypted representations, so the adapter boundary remains important: HTTP clients and other producers must project allowlisted metadata instead of passing raw requests, responses, URLs with credentials/query strings, or secret-bearing payloads.
+
+Provider mode replaces that immutable inventory with one defensive array snapshot per enabled record. For secret policy, the root and children share only the service-owned provider function. A per-record snapshot is released when serialization settles, so removed registry values are not carried into later records. The provider must be total and nonthrowing and return plain current string values; the logger does not invoke secret-bearing getters. A service can maintain a bounded active-session registry behind the function, while session issuance, removal, and expiry remain service responsibilities.
+
+A provider throw or invalid result fails the whole record. No startup/static baseline, empty set, last-known inventory, or partially copied result is used as a fallback. The adapter writes only the fixed error-level failure record with epoch time and a fixed message, excluding service and every caller/provider value, then throws a fixed safe error without a cause. It neither retries the provider nor emits the original record. Ordinary destination errors still propagate if the fallback write itself fails.
 
 ## Concurrency and root-replacement design
 
-The root policy and each child's bindings are immutable after creation. Pino supplies destination sharing and whole-line writes; the wrapper adds no global logger, ambient correlation store, queue, or lock. Calls on one Node event loop have deterministic call order, while multi-process ordering is outside scope.
+The root configuration and each child's copied bindings are immutable after creation; a provider's current inventory is deliberately resolved per record. Pino supplies destination sharing and whole-line writes; the wrapper adds no global logger, ambient correlation store, queue, or lock. Calls on one Node event loop have deterministic call order, while multi-process ordering is outside scope.
 
-If the service adds reload, it constructs a new root rather than mutating level or secrets. This avoids races where an old child uses a partially updated secret set. The service would own dependency replacement and ensure old children are drained or discarded. No asynchronous logger drain is needed, but application work that continues after shutdown can still write if the service fails to stop it. No current service reload trigger is assumed by this package.
+Runtime secret issuance and removal can flow through the provider without mutating logger configuration. If the service adds other configuration reload, it constructs a new root rather than mutating level or secret-source selection. The service owns dependency replacement and ensures old children are drained or discarded; it also explicitly retires any provider they reference. No asynchronous logger drain is needed, but application work that continues after shutdown can still write if the service fails to stop it. No current service reload trigger is assumed by this package.
 
 ## Trade-offs
 
@@ -80,6 +89,7 @@ If the service adds reload, it constructs a new root rather than mutating level 
 - Direct synchronous stdout writes can block the event loop on a slow destination. They provide simple ordering, visible write errors, and shutdown semantics for a single-user service; high-volume payload logging or asynchronous transports would require a new lifecycle contract rather than a hidden option.
 - Fixed redaction and no custom transports reduce flexibility, but prevent callers from accidentally disabling safety or introducing user-controlled Pino redaction paths.
 - Exact registered-value redaction covers raw secrets inside larger strings but cannot recognize transformed secrets. Allowlisted producer metadata is therefore still mandatory.
+- A provider keeps runtime-issued secrets covered without rebuilding logger composition, but adds one plain-array snapshot per enabled record. Failing closed costs the original record and surfaces a fixed programmer error instead of risking output with a stale or empty inventory.
 - Allowlisted errors omit useful custom fields unless callers log them separately. That extra step is deliberate because arbitrary error properties are a common secret-leak path.
 - Numeric levels and epoch milliseconds retain Pino's efficient standard record shape but require consumers to know the documented mapping.
 - A no-op singleton makes isolated tests easy, while real destination-capture tests remain necessary to prove JSON shape and redaction.
@@ -88,6 +98,6 @@ If the service adds reload, it constructs a new root rather than mutating level 
 
 The internal Pino adapter accepts a destination stream at construction; production wiring supplies synchronous stdout, while tests can supply an in-memory `write(line)` sink. This seam is not part of the public package API. It permits exact NDJSON assertions without monkey-patching global stdout and still exercises the real Pino formatter and redactor.
 
-`redaction` and `serialization` are pure internal units for table-driven edge cases. Public-façade tests still cover level gating, reserved fields, children, option copying, and no-op behavior so internal unit tests cannot hide integration mistakes.
+`redaction` and `serialization` are pure internal units for table-driven edge cases. Public-façade tests still cover level gating, reserved fields, children, static option copying, exactly-one source validation, provider call counts/snapshots, later-issued and removed secrets, fail-closed provider errors, and no-op behavior so internal unit tests cannot hide integration mistakes. Internal inventory-lifecycle assertions prove old provider snapshots are released; output assertions alone cannot prove non-retention.
 
 A failing internal destination verifies ordinary write-error propagation, while a closed-pipe subprocess exercises the real stdout path and its `EPIPE` behavior. Exact `err` assertions prove Pino's identity serializer does not reshape errors. Interleaved parent/child calls verify complete-line behavior, and immediate sink reads verify the synchronous lifecycle. Consumer tests in Batch B can use a structural recording `Logger`, but each consumer's redacted-metadata integration tests must use the real logger and capture sink rather than `noopLogger`.

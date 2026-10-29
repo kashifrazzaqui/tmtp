@@ -10,9 +10,11 @@ Supported schemas use static object property names and numeric array indices in 
 
 ## Public interface / API surface
 
-The package entry point exports exactly these public contracts; Zod types are accepted at the boundary but are not re-exported:
+The package entry point exports exactly these public contracts. It re-exports Zod's `z` value so services can construct schemas through the existing declared Zod dependency; Zod types are accepted at the parser boundary:
 
 ```ts
+export { z } from "zod";
+
 export interface ConfigIssue {
   key: string;
   code: "required" | "invalid" | "inconsistent";
@@ -38,7 +40,7 @@ export function parseConfig<T>(
 export function assertValidConfig<T>(result: ConfigResult<T>): T;
 ```
 
-No schema, default, product configuration type, loader, or singleton is exported.
+The `z` re-export is for schema construction only. No product schema, default, product configuration type, loader, registry, or singleton is exported.
 
 ## Result and error contract
 
@@ -83,7 +85,7 @@ The composed product schema must enforce these existing rules without moving the
 
 - `auth.access_token_path` is required in every deployment mode; loopback is not an authentication bypass.
 - `hn.username` and `hn.session_cookie_path` are either both absent/null or both configured. A one-sided configuration produces an `inconsistent` issue at the missing counterpart key. Optional HN integration never makes the core configuration invalid when both are absent.
-- A non-loopback `server.host` requires an HTTPS `server.public_base_url` for the service's cookie/origin policy. A missing or non-HTTPS value in that mode produces an `inconsistent` issue at `server.public_base_url`. Host classification and this deployment refinement belong to the service composition root.
+- A non-loopback `server.host` requires an HTTPS `server.public_base_url` for the service's cookie/origin policy. Independently, a configured public origin whose own host is non-loopback must be HTTPS even when the bind host is loopback. A missing required value or a non-HTTPS non-loopback public origin produces an `inconsistent` issue at `server.public_base_url`. Bind/public-host classification and this deployment refinement belong to the service composition root.
 - Component-owned relations remain in their fragments, including `jobs.backoff_max_ms >= jobs.backoff_base_ms` and `debug.include_llm_payloads=true` requiring `debug.enabled=true`.
 
 `parseConfig` executes these checks only because they are present in the supplied schema. It has no built-in knowledge of HN, HTTP, hostnames, authentication, jobs, or diagnostics.
@@ -111,6 +113,7 @@ If the service adds a controlled reload lifecycle, reload remains a service oper
 
 ## Acceptance-focused test expectations
 
+- Construct a strict nested schema through the exported `z` and parse it through `parseConfig`; assert nested static paths and secret-safe issues for invalid values and secret-shaped unknown keys.
 - Parse a nested schema with required fields, optional defaults, and a transform; assert the complete output, empty issues, presence of `value`, and unchanged input.
 - Cover missing required values, wrong types, invalid enum/range/format values, unknown keys under a strict schema, array indices, and root-level failures; assert exact keys, codes, fixed messages, and absence of `value`.
 - Assert custom refinements map to `inconsistent`, multiple issues retain schema order, and no partial value is returned.
@@ -119,7 +122,7 @@ If the service adds a controlled reload lifecycle, reload remains a service oper
 - Verify direct error construction rejects an empty issue list and that later mutation of a source issue array does not change the error.
 - Verify exceptions from schema application code and async-only schemas propagate rather than being mislabeled as validation issues.
 - Exercise independent repeated parses and a failed-then-successful candidate sequence to prove there is no cached value or stale issue state.
-- At the service composition boundary, cover both HN settings absent, both present, each one-sided case, loopback without a public URL, and non-loopback with missing, HTTP, and HTTPS public URLs. These tests use the composed schema; the tier-0 package does not import the service to run them.
+- At the service composition boundary, cover both HN settings absent, both present, each one-sided case, loopback without a public URL, non-loopback with missing, HTTP, and HTTPS public URLs, and loopback bind hosts with non-loopback HTTP versus HTTPS public origins. These tests use the composed schema; the tier-0 package does not import the service to run them.
 
 ## Internal subcomponents
 

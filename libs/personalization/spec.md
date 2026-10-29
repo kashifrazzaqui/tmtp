@@ -48,6 +48,9 @@ export interface Personalization {
     signal?: AbortSignal,
   ): Promise<import("@tmtp/domain").InterestProfile>;
   scorePending(signal?: AbortSignal): Promise<ScorePendingSummary>;
+  persistLlmAudits(
+    audits: readonly import("@tmtp/llm-interface").LlmCallAudit[],
+  ): Promise<void>;
   applyPreferenceChange(
     rules: readonly import("@tmtp/domain").PreferenceRule[],
     signal?: AbortSignal,
@@ -161,7 +164,7 @@ Runtime exports are exactly `PERSONALIZATION_JOB_PAYLOAD_SCHEMA_VERSION`, `perso
 
 `createPersonalization` validates its complete options object synchronously. It rejects unknown keys and malformed dependencies. `model` must be non-empty with no leading/trailing whitespace and is sent/recorded exactly. `activityBatchSize` and `queueSyncBatchSize` are positive safe integers. Activity, interest, and recommendation policies obey their owning packages' ranges, including a non-negative `maxActivityEvents` and `maxStoriesPerRun`; zero is valid for both. There are no hidden defaults in this package.
 
-Public methods validate JavaScript input at runtime even when callers use TypeScript. A supplied signal must be an `AbortSignal`. `reason` is preserved exactly, must contain non-whitespace, and has a 200 UTF-16-code-unit boundary limit. `recordActivity` first applies `activity.parseActivityBatch`; it then rejects more than `activityBatchSize` rows before storage. `applyPreferenceChange` requires an array of domain rules and lets `interests` enforce normalization, duplicate, and snapshot rules. Invalid direct input produces a rejected Promise, not a synchronous throw after the method begins asynchronous work.
+Public methods validate JavaScript input at runtime even when callers use TypeScript. A supplied signal must be an `AbortSignal`. `reason` is preserved exactly, must contain non-whitespace, and has a 200 UTF-16-code-unit boundary limit. `recordActivity` first applies `activity.parseActivityBatch`; it then rejects more than `activityBatchSize` rows before storage. `applyPreferenceChange` requires an array of domain rules and lets `interests` enforce normalization, duplicate, and snapshot rules. `persistLlmAudits` requires a dense array whose records satisfy llm-interface's general-value and audit rules: non-empty IDs/model, valid purpose and request hash, status/error-code pairing, valid usage values, JSON-safe payloads, and paired positive payload versions. Unknown audit properties are ignored and never persisted. Malformed input is `invalid-input` and never reaches storage. Invalid direct input produces a rejected Promise, not a synchronous throw after the method begins asynchronous work.
 
 A pre-aborted cancellable operation returns/rejects as specified under Cancellation without storage writes, provider work, new jobs, or synthetic audits. Validation precedes the abort outcome, so malformed input does not become cancellation merely because its signal is aborted.
 
@@ -256,6 +259,8 @@ scoreStories({
 The exact caller signal and all planned articles reach `recommendations`. That package owns story order, batch sizing, prompt limits, per-attempt provider behavior, and the returned `completion`/`attempts`. Personalization adds no provider retry, timeout, prompt mutation, or parallel fan-out.
 
 ### Audit mapping and immutable reuse
+
+`persistLlmAudits` is the single standalone audit-persistence boundary for service connection checks and other already-settled `LlmPort` results. It calls no LLM and creates no recommendation, failure, profile, queue, or job writes. An empty array resolves without a clock read, transaction, or storage call. A nonempty array uses one clock observation and one synchronous store transaction, then follows the exact mapping/deduplication/reuse rules below. It does not acquire the profile pipeline mutex: audit rows are immutable, the shared synchronous store serializes the short transaction, and a probe must not wait behind an unrelated scoring call. Conflicts roll back that standalone transaction and produce `audit-conflict`; no raw audit payload or provider error enters the exception. Scoring and readable scoring-error paths use the same private audit writer inside their documented result transactions rather than a second mapping implementation.
 
 For a normal `RecommendationBatch`, open one synchronous result transaction only after `scoreStories` settles. Read one audit-observation timestamp from the clock. Map each `LlmCallAudit` to `LlmCallRecord` as follows:
 
@@ -467,6 +472,8 @@ Tests use real SQLite for composition, a fixed clock, a scripted `LlmPort`, and 
 - `should link each new recommendation to its own batch final successful callId after earlier failed attempts`.
 - `should preserve first audit timestamps and original recommendation timestamps and call links on compatible retries`.
 - `should persist RecommendationError attempts before rethrowing and never invent an audit for an empty attempt history`.
+- `should persist standalone connection-check audits through the same mapping and first-observation reuse rules with one transaction and no profile pipeline wait or other domain writes`.
+- `should make standalone empty audits a no-op and reject malformed or conflicting audit streams without partial inserts or raw payload disclosure`.
 - `should reject conflicting audit or recommendation identities without overwriting immutable rows`.
 - `should mark only still-current failures with safe text and leave replacement story or article content pending`.
 - `should write scored rows only through complete projection and never call markEvaluation for scored`.

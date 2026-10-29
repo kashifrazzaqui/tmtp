@@ -346,7 +346,8 @@ export interface DiagnosticsOptions {
   jobs: import("@tmtp/job-queue").JobQueue;
   clock: import("@tmtp/clock").Clock;
   sleep: import("@tmtp/clock").Sleep;
-  secretValues: readonly string[];
+  secretValues?: readonly string[];
+  secretValuesProvider?: () => readonly string[];
   debug: {
     enabled: boolean;
     streamIntervalMs: number;
@@ -374,6 +375,7 @@ export function createDiagnostics(options: DiagnosticsOptions): Diagnostics;
 5. An already-aborted signal takes no snapshot. An abort stops waiting and future reads. During sleep, rejection uses the exact `signal.reason`. Iterator `return()` cancels pending sleep and removes listeners. No timer or listener survives stream settlement.
 6. Configuration is immutable for the instance. The service closes active streams before discarding an instance during shutdown or configuration replacement.
 7. Concurrent `next()` calls on one iterator are serialized in call order and receive distinct sequence numbers. They never overlap snapshot reads.
+8. Provider-backed redaction resolves once per frame, after any wait and as part of producing that frame's complete snapshot. The frame does not trigger a second provider call for an internal snapshot. A provider failure rejects that pull with the fixed safe error, emits no frame, does not consume a sequence number, and causes no automatic retry.
 
 The service may map each frame to an SSE event named `debug-snapshot`, use the decimal sequence as the per-connection event ID, and serialize the frame as JSON. It owns HTTP headers, authentication, heartbeats, connection cleanup, and any SSE `retry` hint. There is no replay buffer or resume contract: a reconnect starts a new sequence and a complete fresh snapshot. `Last-Event-ID` has no meaning to this library.
 
@@ -400,13 +402,23 @@ All returned strings are bounded and copied. Codes and kind/component names are 
 
 ### Secret and key redaction
 
-`secretValues` is required. The service supplies every loaded access token, HN session cookie, LLM API key, CSRF secret, and comparable raw secret, using the same complete set given to logging. The factory copies the array and ignores empty strings. Later caller mutation does not change policy.
+Exactly one of `secretValues` or `secretValuesProvider` is required; both or neither is `invalid-configuration`. There is no default secret inventory. Static callers retain the existing `secretValues` behavior, including explicitly passing `[]` when no secrets exist. The service supplies every currently active access token, HN session cookie, LLM API key, CSRF secret, and comparable raw secret, using the same complete current inventory given to logging.
+
+In static mode, the factory defensively snapshots the array at construction and ignores empty strings. Later caller mutation does not change policy. In provider mode, the function is service-owned, total, and nonthrowing, and returns a plain array of current raw string values. It must not expose lazy values or require diagnostics to invoke secret-bearing getters. Only this explicitly supplied function is called; provider-returned values and exceptions are never copied into DTOs, errors, or logs.
+
+Provider mode calls the function once for each complete `debugSnapshot()` serialization and once for each `debugStream()` frame, after any stream wait. The returned array is defensively snapshotted before any DTO or payload redaction for that unit, and empty strings are ignored. A stream frame and its contained complete snapshot share one inventory, not two provider calls. All sections, cursors, strings, keys, and payloads in that unit use the same snapshot. Construction, stream creation, sleeping, and liveness/readiness/capability calls do not call the provider. Each per-unit snapshot is discarded when its serialization attempt settles; diagnostics retains the provider function, not old inventories or values removed from the service registry.
+
+The service can back the provider with a bounded active-session registry, adding secrets on issuance and removing them on logout, revocation, or expiry. Diagnostics does not own the registry, discover sessions, or expire them.
+
+A provider throw or invalid result is a programmer error. Diagnostics does not use a startup/static baseline, empty inventory, last-known inventory, or partial result. It throws `DiagnosticsError` with code `redaction-provider-failed` and a fixed safe message, without returning the snapshot or frame. The error has no public `cause` or provider details. No raw or partial debug value is returned, the failure is not downgraded to a section's `read-failed`, and the same call does not retry the provider.
 
 For captured payload values and all copied strings, diagnostics performs literal, case-sensitive, global replacement with `[Redacted]`, longest match first at a given position. Replacement output is not scanned again. This is the same value-redaction policy as logging, implemented locally because logging exports no redactor and diagnostics has no logging dependency.
 
 Payload object keys are compared case-insensitively after removing `_` and `-`. The sensitive-key set is the complete set in `libs/logging/spec.md`, plus `headers`, `requestHeaders`, `responseHeaders`, `rawHeaders`, `url`, `uri`, `error`, `errors`, `err`, `exception`, and `stack`. A matching value is replaced wholesale with `[Redacted]` without traversal. This blocks nested credentials, raw header maps, URL fields, and embedded error objects. URL tokens inside longer strings are also replaced with `[RedactedUrl]`.
 
 Redaction handles only registered raw secret values and recognized structures. Producers must still honor the LLM interface's no-secret projection contract; encoded, transformed, or unregistered secrets cannot be detected reliably. Payload capture is never permission to place credentials in prompts, story/profile projections, or provider calls.
+
+Provider mode changes only how the registered-value inventory is obtained. It does not expand any DTO allowlist, authorize debug content, relax payload visibility or budgets, or add secret inventory metadata to output.
 
 ### LLM payload visibility
 
@@ -433,6 +445,7 @@ export type DiagnosticsErrorCode =
   | "invalid-configuration"
   | "invalid-input"
   | "debug-disabled"
+  | "redaction-provider-failed"
   | "invalid-query"
   | "invalid-cursor"
   | "cursor-query-mismatch";
@@ -445,17 +458,18 @@ export class DiagnosticsError extends Error {
 
 Each code has one fixed, short message that contains no supplied value, upstream message, payload, path, or URL. Consumers branch on `code`, never message text. The error has no public `cause` or arbitrary details field.
 
-- Construction rejects invalid options, copied-secret input, interval policy, and the payload-policy combination as `invalid-configuration`.
+- Construction rejects invalid options, both/neither secret-source selection, invalid static secret input or provider function, interval policy, and the payload-policy combination as `invalid-configuration`.
 - Malformed health input is `invalid-input`.
 - Debug queries are validated completely before any read. Bad limits/filters are `invalid-query`; malformed/unknown cursors are `invalid-cursor`; a cursor used with another section/filter is `cursor-query-mismatch`.
 - Expected store/queue read failures become unavailable sections, not thrown raw errors. Health and capability methods do not perform storage reads and do not convert failed capabilities into exceptions.
+- A provider throw or invalid result at a debug serialization boundary is `redaction-provider-failed`. It fails the complete snapshot/frame closed and never exposes the original exception, returned values, or a partial DTO.
 
 Cancellation is not a `DiagnosticsError`; stream abort uses the original abort reason. The service must close the transport without serializing that reason.
 
 ## Concurrency, consistency, and lifecycle
 
 - All repository and queue access is synchronous and read-only. A single snapshot performs bounded reads in a fixed section order and never calls external services.
-- Calls and streams on one instance are independent. Options and secret values are copied at construction; returned DTOs and pages are fresh values, so caller mutation cannot alter later snapshots or cursors.
+- Calls and streams on one instance are independent. Options and static secret values are copied at construction; each provider-backed snapshot/frame uses its own defensive inventory copy. Returned DTOs and pages are fresh values, so caller mutation cannot alter later snapshots or cursors.
 - Cursors are self-contained. The library keeps no server-side cursor table, replay cache, snapshot cache, mutable correlation context, or global stream registry.
 - Independent streams have independent sequence numbers, cancellation, and payload budgets. One stream's slow consumer or abort does not block another.
 - There is no cross-section SQLite snapshot guarantee. This avoids holding a long read transaction while jobs and ingestion continue. Consumers use timestamps and correlation IDs, not arrival order alone, to follow an operation.
@@ -494,7 +508,7 @@ The service's validated configuration object supplies resolved values; the facto
 - `debug.stream_interval_ms` — **optional**, default `2000`; integer from `250` through `60000`. It is the delay between snapshots, not a promise of exact wall-clock cadence.
 - `debug.include_llm_payloads` — **optional**, default `false`; requires `debug.enabled=true`. It enables non-secret stored payload previews subject to all redaction and size rules. `true` with debug disabled is invalid configuration rather than silently ignored.
 
-Page sizes, string/depth/node limits, and payload budgets are fixed public contract bounds, not operator-tunable configuration. Secret values come from loaded secrets, never from debug query input.
+Page sizes, string/depth/node limits, and payload budgets are fixed public contract bounds, not operator-tunable configuration. Exactly one explicit static inventory or current-value provider is required; neither has a default, and neither comes from debug query input.
 
 ## Acceptance-focused test expectations
 
@@ -510,6 +524,11 @@ Page sizes, string/depth/node limits, and payload budgets are fixed public contr
 
 - Assert exact DTO keys for every record family. Fixtures include payloads, dedupe keys, lease tokens, raw profile fields, provider IDs, URLs, and arbitrary error messages; none may leak into JSON output.
 - Use unique secret sentinels for access, session, CSRF, HN, and LLM credentials in nested objects, arrays, keys, strings, and URL user-info/query positions. Assert none occurs in snapshots, cursors, stream frames, or thrown diagnostics errors.
+- Prove static mode remains unchanged: constructor arrays are defensively snapshotted, empty strings are ignored, no provider is involved, and existing callers using `secretValues: []` retain the same output and validation behavior. Assert exactly one secret source is required and both/neither selections fail with fixed safe `invalid-configuration` errors.
+- With a provider, issue a new secret sentinel after diagnostics construction and assert the next complete snapshot and next stream frame redact it in every applicable string, key, and payload. Assert one provider call per one-shot snapshot and per frame, no second call for a frame's contained snapshot, and no calls during construction, stream waits, or health/capability methods.
+- Change the provider's source inventory from a repository read callback during a snapshot. Assert the in-progress snapshot still uses its original defensive copy consistently across all sections and payloads, while the next snapshot uses the new inventory. Mutate a returned provider array after a unit settles and prove it cannot alter that unit or the stored policy.
+- Remove a provider-backed sentinel after the current snapshot/frame settles. Assert later units use only the new inventory and inspect the internal per-unit inventory lifecycle to prove the removed value and prior array are not retained by the diagnostics instance or stream; output inspection alone is not sufficient to prove non-retention.
+- Make the provider throw and return invalid arrays in separate snapshot and stream cases. Assert fixed safe `redaction-provider-failed` errors with no cause or provider values/text, no raw or partial snapshot/frame, no section-only fallback, no sequence consumption, and no same-call retry.
 - Cover the logging sensitive-key spelling families plus raw headers, URL fields, and embedded error objects at arbitrary supported depths. Assert URL tokens inside prompt text are redacted.
 - With capture disabled, prove stored payload/version values never escape and state is `not-captured` or `hidden-by-policy` as appropriate. With capture enabled, prove only sanitized versioned JSON is returned and old uncaptured records remain uncaptured.
 - For failed, timed-out, cancelled, and invalid-output LLM audits, assert stored response payloads are `suppressed-error-response`. Persist audits from both result and error fixtures in upstream composition tests, then verify diagnostics adds no audit and performs no write.
@@ -526,6 +545,6 @@ Page sizes, string/depth/node limits, and payload budgets are fixed public contr
 
 ### Concurrency and workflow acceptance
 
-- Mutate constructor arrays and returned DTOs after calls; later snapshots must remain unchanged. Run interleaved snapshots/streams while jobs update and verify independent cursors, fresh outputs, bounded reads, and no shared payload budget.
+- Mutate static constructor arrays and returned DTOs after calls; later snapshots must remain unchanged. Run interleaved provider-backed snapshots/streams while jobs update and the current secret inventory changes; verify independent per-unit inventories and cursors, fresh outputs, bounded reads, no retained old inventories, and no shared payload budget.
 - WF-01/WF-07: local readiness succeeds independently of external probe failure, while missing local requirements remain not ready.
 - WF-08: an operator can inspect sync runs, lease/attempt metadata, queue evaluation counts, safe recent errors, and LLM usage without reading the database or exposing secrets/messages.

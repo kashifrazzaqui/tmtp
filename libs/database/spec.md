@@ -51,11 +51,18 @@ export type DatabaseErrorCode =
   | "async-transaction"
   | "driver";
 
+export type MigrationFailureReason =
+  | "checksum-mismatch"
+  | "invalid-order"
+  | "sql-failed"
+  | "invalid-migration";
+
 export class DatabaseError extends Error {
   readonly name: "DatabaseError";
   readonly code: DatabaseErrorCode;
   readonly retryable: boolean;
   readonly migrationId?: string;
+  readonly migrationReason?: MigrationFailureReason;
   readonly cause?: unknown;
 }
 
@@ -75,12 +82,25 @@ export function migrate(database: Database, migrations: readonly Migration[]): v
 
 ## Migration contract
 
-1. `migrate` validates all IDs and duplicate IDs before changing the schema.
+1. `migrate` validates every migration definition, ID, and duplicate ID before changing the schema.
 2. IDs match `[a-z0-9][a-z0-9._-]*`; lexicographic ID order is execution order. Every pending ID must sort after the greatest applied ID.
 3. The ledger table is `schema_migrations(id TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`.
-4. Each migration's SHA-256 checksum is computed from its exact SQL bytes. An already-applied ID with a different checksum fails with `migration` and changes nothing.
-5. Each pending migration and its ledger insert commit in one transaction. A failure leaves earlier migrations applied, the failing migration unapplied, and identifies `migrationId`.
+4. Each migration's SHA-256 checksum is computed from its exact SQL bytes. An already-applied ID with a different checksum fails with `code="migration"`, `migrationReason="checksum-mismatch"`, and changes nothing.
+5. Each pending migration and its ledger insert commit in one transaction. A failure has `migrationReason="sql-failed"`, leaves earlier migrations applied and the failing migration unapplied, and identifies `migrationId`.
 6. Applied migrations are never edited or rerun. Migration SQL runs through the driver's multi-statement execution path; application queries remain parameterized.
+
+Every `DatabaseError` with `code="migration"` is nonretryable and has a `migrationReason`. The property is absent for every other error code. Migration failures map to reasons only as follows:
+
+| Failure | `migrationReason` |
+| --- | --- |
+| Malformed migration definition or ID, or a duplicate ID in the supplied definitions | `invalid-migration` |
+| A pending ID does not sort after the greatest applied ID | `invalid-order` |
+| An applied ID's ledger checksum differs from its definition's checksum | `checksum-mismatch` |
+| Migration SQL execution, a ledger operation, or a migration transaction fails | `sql-failed` |
+
+`invalid-order` describes ordering only; malformed and duplicate definitions use `invalid-migration`. `migrationId` is preserved whenever it is known and applicable. Stable migration metadata contains no SQL text, SQL parameter values, or raw driver messages.
+
+Service readiness maps the recorded result of its startup `migrate` call directly from this metadata. It does not match error messages or reimplement ledger queries and checksum checks. `migrate` remains the only migration ledger implementation, and no migration inspector API is exposed.
 
 The migration ledger uses the database clock for `applied_at`; it is operational metadata, not domain event time. Libraries export migration arrays but do not call `migrate` themselves.
 
@@ -121,6 +141,11 @@ New build wrapping `better-sqlite3` `13.0.3`; handwritten SQL, no ORM.
 
 - Open/close is idempotent; foreign keys and busy timeout are effective; WAL mode is verified on disk.
 - Query helpers bind all value types and reject ambiguous `queryOne` results.
-- Migrations commit atomically, reject duplicates/out-of-order IDs and changed checksums, and resume after a failing migration.
+- Malformed migration definitions or IDs and duplicate IDs fail before schema changes with `code="migration"`, `migrationReason="invalid-migration"`, and `retryable=false`.
+- A pending ID that does not sort after the greatest applied ID fails before migration execution with `migrationReason="invalid-order"`; no other failure uses this ordering-only reason.
+- An applied migration with a changed checksum fails with `migrationReason="checksum-mismatch"`, preserves its `migrationId`, and applies no pending migration.
+- Migration SQL, ledger, and migration transaction failures use `migrationReason="sql-failed"`. Each migration commits atomically with its ledger insert: earlier migrations remain applied, the failing migration rolls back, and a later run resumes after the failure.
+- Every migration error has its mapped reason and is nonretryable; every non-migration `DatabaseError` omits `migrationReason`. `migrationId` survives normalization where known and applicable, while stable metadata excludes SQL text, parameter values, and raw driver messages.
+- Readiness classifies the recorded `migrate` result without message matching, a second ledger implementation, or a migration inspector API.
 - Nested work rolls back independently through savepoints; async callbacks cannot commit early.
 - Constraint, busy, closed, integrity, and driver failures retain safe codes and causes without parameter values.

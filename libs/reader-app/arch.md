@@ -321,15 +321,23 @@ Personalization payload validation, migrations, and dedupe keys remain exclusive
 `runJob` is a logical-effect dispatcher. The service worker is the lease state machine:
 
 ```text
-job = jobs.claim(eight kinds)               // worker, transaction commits
-while active: jobs.renew(id, token)         // worker heartbeat
-await readerApp.runJob(job, signal)         // logical effects only
-jobs.complete(id, token)                    // worker
-on error: jobs.fail(id, token,
-                    readerAppJobFailure(job.kind, error))
+claim = jobs.claim(eight kinds)              // worker, transaction commits
+if claim.status == "leased":
+  job = claim.job
+  while active: jobs.renew(id, token)        // worker heartbeat
+  await readerApp.runJob(job, signal)        // logical effects only
+  jobs.complete(id, token)                   // worker
+  on error: jobs.fail(id, token,
+                      readerAppJobFailure(job.kind, error))
+if claim.status == "rejected":
+  no runJob, heartbeat, completion, failure, or failure mapping
+if claim.status == "idle":
+  no eligible job and no rejection; run no handler
 ```
 
 The handler validates the leased job shape and decodes the payload again at its public trust boundary, but it cannot prove the lease is still current and does not try. A lease can expire between an external result and commit; idempotent application effects are mandatory. Job-queue rejects stale completion/failure separately.
+
+Only a `leased` result enters the handler path. A `rejected` result carries the fresh terminally failed job after job-queue's invalid-payload transaction commits. It is an expected contained queue outcome: the worker does not call `runJob`, renew or finalize a nonexistent lease, invoke `readerAppJobFailure`, or treat the rejection as a reader-app handler or readiness failure. An `idle` result has no selected job to process.
 
 `readerAppJobFailure` handles article-attempt-failed first so its safe dependency code cannot be swallowed by the facade catch-all. It then applies the common facade table to every kind: invalid-job/not-found/cancelled/dependency-failure/internal-failure and every other remaining `ReaderAppError` retain stable codes and declared retryability. Only non-facade errors delegate to the activity/personalization or ingestion owner mapper. The remaining unknown article error uses fixed retryable `reader-app-failed`. Raw exceptions/messages/abort reasons never enter the jobs table.
 
@@ -407,8 +415,8 @@ Test layers are:
 2. **Queue integration tests:** independently compute manifests/group pages, mix bootstrap and multiple ranked versions, cross every section/group boundary, and compare full page concatenation with expected tuples. Mutate one field at a time to prove stale/valid continuation rules. Assert one bounded story batch read and exact story-detail alignment on every page shape.
 3. **Detail/command integration tests:** exact recommendation links, safe fallback fixtures, stale cached content, all transitions, independent history streams, and delegate result shapes.
 4. **HN action crash/concurrency tests:** deferred state/form/POST/readback phases, same-key single-flight with leader/follower aborts, every outcome transition, adapter/reconciliation result replay, verified replay ensure, absent-account terminal replay/new-intent rejection, outbox identity, and transaction rollback after external verification.
-5. **Article/worker integration tests:** source/pipeline eligibility, same-source failed retries, conditional stale-source races, newer-ready/older-failure lease races, retryable/terminal post-commit failures, exact worker failure rows, lease recovery, and stale tokens.
-6. **End-to-end restart tests:** close/reopen SQLite between every transaction boundary and run the real eight-kind worker. Assert logical counts, original timestamps/IDs/explanations, complete queue reachability, durable scheduler recovery, and no duplicate activity/article effects.
+5. **Article/worker integration tests:** source/pipeline eligibility, same-source failed retries, conditional stale-source races, newer-ready/older-failure lease races, retryable/terminal post-commit failures, exact worker failure rows, lease recovery, and stale tokens. Exercise all three claim statuses and assert rejected/idle never dispatch a handler; rejected causes no reader-app failure mapping or readiness failure.
+6. **End-to-end restart tests:** close/reopen SQLite between every transaction boundary and run the real eight-kind worker. Assert logical counts, original timestamps/IDs/explanations, complete queue reachability, durable scheduler recovery, and no duplicate activity/article effects. Include poison/valid sequences and prove each rejection survives restart as terminal queue state without a handler attempt.
 
 Queue expected values must not be generated solely with the production cursor/fingerprint helpers. Use independent canonical fixtures, and compare store pages with pure queue pagination for one-version projections. For HN/article tests, assert exact request counts and transaction placement, not only returned statuses. Fixture success never establishes live HN capability; live account smoke checks remain separate and explicit.
 

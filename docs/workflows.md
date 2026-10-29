@@ -76,9 +76,10 @@
 **Steps:**
 1. Open a story and load cached or freshly fetched extracted content.
 2. If extraction is unavailable, use the original-page fallback with a clear indication of reduced observation.
-3. Record impressions, opens, active dwell, scroll progress, completion, skips, and reading-state changes with client idempotency keys.
-4. Reduce activity batches into reading sessions and append immutable observations.
-5. Trigger asynchronous profile and recommendation updates without delaying the reading response.
+3. Record impressions, opens, active dwell, scroll progress, completion, and skips through activity batches with client idempotency keys.
+4. Change reading state through the queue-state command; same-state requests are idempotent and do not synthesize activity observations.
+5. Reduce activity batches into reading sessions and append immutable observations.
+6. Trigger asynchronous profile and recommendation updates without delaying the reading response.
 
 **Serving components:** `services/personal-reader` → `reader-app` → `article-reader` → `article-fetcher` / `article-extractor`; `activity` → `reader-store`; `personalization` jobs.
 

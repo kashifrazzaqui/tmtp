@@ -8,7 +8,7 @@ The package has a small public barrel and three internal concerns:
 - `issues`: classifies Zod issues, formats stable paths, and emits the fixed safe messages in `spec.md`.
 - `validation-error`: owns `ConfigValidationError`, defensive issue copies, aggregate formatting, and malformed-result protection in `assertValidConfig`.
 
-The public barrel exposes only `ConfigIssue`, `ConfigResult`, `ConfigValidationError`, `parseConfig`, and `assertValidConfig`. There is no product schema module, loader, registry, environment adapter, or singleton. Component and service schemas remain outside this tier-0 package.
+The public barrel exposes `ConfigIssue`, `ConfigResult`, `ConfigValidationError`, `parseConfig`, `assertValidConfig`, and Zod's `z` value. The `z` re-export supports schema construction only; there is no product schema module, loader, registry, environment adapter, or singleton. Component and service schemas remain outside this tier-0 package.
 
 ## Control and data flow
 
@@ -44,7 +44,7 @@ A successful Zod parse is returned directly as the typed value. The library does
 
 ## Zod use and schema ownership
 
-Zod is the only runtime dependency and the source of parsing semantics. Defaults, `.catch()`, strict objects, transforms, and refinements behave exactly as the supplied synchronous schema defines them. The library does not call `safeParseAsync`, catch application exceptions from schema code, or turn an async-schema error into a user configuration issue.
+Zod is the only runtime dependency and the source of parsing semantics. The public `z` re-export lets services construct schemas through `@tmtp/config` using that existing declared dependency, without adding dependency or manifest edges. Defaults, `.catch()`, strict objects, transforms, and refinements behave exactly as the supplied synchronous schema defines them. The library does not call `safeParseAsync`, catch application exceptions from schema code, or turn an async-schema error into a user configuration issue.
 
 Custom Zod issues map to `inconsistent`; built-in checks map to `required` or `invalid`. This gives component schema authors one clear convention: built-ins validate fields, while custom refinements express relations between fields. The generic mapper does not inspect custom params or custom messages, so diagnostics cannot accidentally disclose secrets embedded by a refinement.
 
@@ -71,6 +71,7 @@ If the service adds reloads, it owns any atomic active-config swap, version orde
 - A result object plus explicit assertion supports aggregate diagnostics, but callers can construct malformed results in JavaScript. The own-property and non-empty-issue checks cover the meaningful malformed cases without adding a second result encoding.
 - Synchronous-only schemas keep startup and reload deterministic. Async secret reads and connectivity probes remain separate service operations and cannot be smuggled into validation.
 - Static schema paths make the non-echo guarantee enforceable, but exclude dynamic-key records/maps and input-derived custom paths. Product configuration uses fixed namespaces and therefore does not need those schema forms.
+- Re-exporting `z` adds a small explicit runtime surface and avoids undeclared transitive Zod imports; consumers must use the same supported synchronous, static-path schema contract.
 - Returning Zod's output avoids another clone and preserves transforms, but also means mutability and purity of custom schemas are part of the component contract.
 - A generic parser avoids a central product registry, at the cost of requiring the composition root and component contracts to make schema ownership explicit.
 

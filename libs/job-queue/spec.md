@@ -28,6 +28,11 @@ export interface JobEnqueueResult {
   inserted: boolean;
 }
 
+export type JobClaimResult =
+  | { status: "leased"; job: import("@tmtp/domain").Job }
+  | { status: "rejected"; job: import("@tmtp/domain").Job }
+  | { status: "idle" };
+
 export interface JobFailure {
   code: string;
   message: string; // safe, bounded diagnostic text
@@ -87,7 +92,7 @@ export interface DiagnosticJobCursor {
 export interface JobQueue {
   enqueue(job: JobEnqueue): JobEnqueueResult;
   get(jobId: string): import("@tmtp/domain").Job | undefined;
-  claim(kinds: readonly string[]): import("@tmtp/domain").Job | undefined;
+  claim(kinds: readonly string[]): JobClaimResult;
   renew(jobId: string, leaseToken: string): import("@tmtp/domain").Job;
   complete(jobId: string, leaseToken: string): void;
   fail(jobId: string, leaseToken: string, failure: JobFailure): void;
@@ -100,13 +105,14 @@ export function createJobQueue(options: JobQueueOptions): JobQueue;
 export const jobQueueMigrations: import("@tmtp/database").Migration[];
 ```
 
-Construction rejects duplicate codec kinds and registers no handlers. The service maps kinds to idempotent handlers separately. `claim` may decode and persist a migrated payload before returning the leased job; an undecodable stored job becomes terminally `failed` with `invalid-payload` instead of reaching a handler.
+Construction rejects duplicate codec kinds and registers no handlers. The service maps kinds to idempotent handlers separately. `claim` returns a discriminated `JobClaimResult`: a leased job, a rejected undecodable job, or idle. It may decode and persist a migrated payload before returning a leased job; an undecodable selected stored job becomes terminally `failed` with `invalid-payload` and is returned as `rejected` instead of reaching a handler.
 
 ## State and idempotency contract
 
 - `enqueue` validates the payload at the supplied current version. `payloadSchemaVersion` must equal the codec's current version for new work.
 - A non-empty `dedupeKey` identifies the complete logical effect. The first active payload wins. A duplicate active `(kind,dedupeKey)` returns `inserted=false` and the existing job without changing its schedule or payload. Completed/failed jobs do not block later logical work.
-- `claim` selects the oldest eligible queued job whose kind is requested, `runAfter<=now`, and `attempts<maxAttempts`. It atomically changes status to `leased`, generates a random lease token, sets expiry to `now+leaseMs`, and increments `attempts`. Attempt counts therefore count started handler attempts.
+- `claim` selects at most one oldest eligible queued job whose kind is requested, `runAfter<=now`, and `attempts<maxAttempts`. When the selected payload decodes, it atomically changes status to `leased`, generates a random lease token, sets expiry to `now+leaseMs`, increments `attempts`, and returns `{ status: "leased", job }`. Leased behavior is otherwise unchanged, and attempt counts count started handler attempts. When no job is eligible and no rejection occurred, it returns `{ status: "idle" }` without a state transition.
+- If the selected stored job is undecodable, the same synchronous claim transaction terminally marks that job `failed` with stable `lastErrorCode="invalid-payload"` and the existing safe fixed invalid-payload `lastError` message, never codec/parser text or payload content. No handler runs and no lease is created: `attempts` remains unchanged, lease fields are cleared, and `completedAt`/`updatedAt` are set. Only after that terminal transition commits, `claim` returns `{ status: "rejected", job }`, where `job` is the fresh terminally failed `Job` without a lease token. This committed invalid-payload transition is the only `rejected` outcome. One claim handles at most this one selected job; it never skips an unbounded sequence of poison rows to find another job.
 - `renew` requires the matching leased token and sets a new expiry from the current clock. Long-running workers renew before expiry; renewal does not increment attempts.
 - `complete` requires the matching leased token, marks `done`, clears lease fields, and sets `completedAt`/`updatedAt`.
 - `fail` requires the matching leased token. It persists `lastErrorCode=failure.code` and the separately bounded safe `lastError=failure.message`. Retryable failure with attempts remaining returns the job to `queued` with cleared lease fields and deterministic backoff; otherwise it becomes terminally `failed` and sets `completedAt`. Recovery uses stable `lease-expired`/`attempts-exhausted` codes rather than parsing message text.
@@ -154,8 +160,10 @@ New build over the shared SQLite database; no external queue service.
 
 - Validate/migrate every registered payload version; reject unknown kinds and future/corrupt versions without exposing payload data.
 - Deduplicate only active matching keys and report whether insertion occurred, including under an outer store transaction.
-- Prove claim, renewal, completion, failure, and recovery transitions against real SQLite and stale lease tokens.
-- Cover retry exhaustion, deterministic backoff, delayed jobs, bounded recovery, and crash/restart after lease expiry.
+- Prove leased claim, renewal, completion, failure, and recovery transitions against real SQLite and stale lease tokens. Verify leased claims preserve payload migration, return a lease token, and increment attempts exactly once.
+- Verify an undecodable selected row returns `rejected` only after its terminal `invalid-payload` transition commits, with unchanged attempts, cleared lease fields, set `completedAt`/`updatedAt`, the fixed safe message, and a fresh failed job without a lease token. Assert no handler or lease finalization runs.
+- Verify `idle` is returned only when no job is eligible and no rejection occurred, with no state transition. Use ordered poison/valid/poison sequences to prove each claim handles at most one selected row and never skips poison rows to lease a later job in the same call.
+- Cover retry exhaustion, deterministic backoff, delayed jobs, bounded recovery, and crash/restart after lease expiry. Reopen after rejection and prove the row remains terminally failed, attempts still count only started handler attempts, and subsequent claims process later rows one at a time or return idle.
 - Verify stable `lastErrorCode` persistence, descending job keyset pages with unchanged filters, exact-timestamp tie-breaking, and no payload/lease-token data in cursor positions.
 - Verify failed-job diagnostic candidates use the same synthetic-ID/update-time ordering as merged error cursors, including equal-timestamp prefix comparisons.
 - Demonstrate that an at-least-once duplicate handler attempt does not duplicate logical application effects.
