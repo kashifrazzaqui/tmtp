@@ -413,3 +413,75 @@
 **Revisit if:** Required error evidence cannot be represented by the owning records or query measurements justify a separately maintained diagnostic projection.
 
 ---
+
+## 2026-10-28 — Fail-closed article transport and decoding
+**Chosen:** Resolve and classify every address for every manual redirect, reject mixed public/private answers, pin each hop, and apply one overall DNS/HTTP/decode budget. Bound transfer and decoded bytes independently; support only identity/gzip/deflate/Brotli and UTF-8 HTML.
+**Alternatives:** Resolve only the initial URL; select a public address from a mixed answer; rely on Content-Length or compressed size; restart the timeout per hop; use platform fetch defaults.
+**Why:** Redirect/DNS changes and compressed expansion are the main arbitrary-URL risks. Explicit policies make SSRF, resource exhaustion, and timeout behavior testable at the owning boundary.
+**Trade-offs:** Fail-closed DNS rejects some valid sites and selecting one address gives no Happy Eyeballs fallback. Multiple codings add decode complexity, and non-cooperative custom dependencies still cannot be forcibly stopped.
+**Revisit if:** Measured compatibility requires a reviewed address-fallback/charset/encoding policy or the transport gains equivalent enforceable guarantees.
+
+---
+
+## 2026-10-28 — Sparse official HN items with preserved tombstones
+**Chosen:** Permit type-less deleted/dead raw items, reject type-less live items, and merge tombstones with previous story metadata only during normalization. Preserve additive raw fields and hash reader-facing story content while excluding volatile score/comment/observation fields.
+**Alternatives:** Require `type` on every item; invent `type=story`; discard sparse tombstones; overlay previous fields onto live stories; include HN popularity in recommendation content identity.
+**Why:** The official API guarantees only `id`, but deletion evidence must remain durable without fabricating story data. Previous metadata is historical display context, not proof about a live refresh.
+**Trade-offs:** A type-less tombstone without a previous story cannot become a domain Story. Ingestion must read prior state for refresh, and raw/type-less distinctions require explicit fixtures.
+**Revisit if:** The official API strengthens its item schema or tombstone semantics change.
+
+---
+
+## 2026-10-28 — Conservative authenticated HN actions
+**Chosen:** Use a dedicated no-retry account client for exact throttling, serialize account operations, discover fresh forms, dispatch at most one POST, require positive readback, and preserve post-dispatch uncertainty as `indeterminate`. Keep flag readback disabled by default and list absence non-evidentiary.
+**Alternatives:** Share the retry-enabled general client; treat HTTP 200 as success; follow POST redirects; infer removal from missing rows/elements; enable flag support from fixtures alone.
+**Why:** Authenticated HTML is unstable and mutations are not safely repeatable. Reconciliation-first retries and explicit uncertainty prevent false activity and duplicate actions while exact wire-attempt throttling remains enforceable.
+**Trade-offs:** More actions remain unresolved and changed markup can block otherwise valid actions. The service owns an additional client configuration, and live capability remains unverified until separately observed.
+**Revisit if:** HN offers a supported authenticated API or independently verified markup/readback contracts justify different action semantics.
+
+---
+
+## 2026-10-28 — Sequential whole-batch recommendation exchanges
+**Chosen:** Plan story-ID-ordered bounded batches, require one complete validated judgment per requested story, execute batches sequentially, and return partial cancelled work plus every audit. Deterministic immutable IDs include all story/article/profile/prompt/model version dimensions.
+**Alternatives:** Accept partial batch judgments; parallel fan-out; silently truncate prompts; retry failed operations again in recommendations; discard failed/cancelled attempts.
+**Why:** Whole-batch acceptance prevents ambiguous missing-story outcomes, while sequential calls make prompt budgets, cancellation, and audit order inspectable. Complete version identity supports safe exact-key retries.
+**Trade-offs:** One invalid judgment rejects the whole provider batch and sequential execution limits throughput. Cancellation returns partial work that the composing job must distinguish from complete recovery.
+**Revisit if:** Per-story output acceptance or measured provider throughput justifies a new prompt/audit contract.
+
+---
+
+## 2026-10-28 — Atomic stale-score invalidation and extraction-source versions
+**Chosen:** Store `Article.sourceContentVersion` separately from derived `Article.contentVersion`. When story or derived article input versions change, atomically move a stale scored queue row to pending and clear scored fields while retaining its prior rank version until full reprojection.
+**Alternatives:** Keep stale scored rows until a later reprojection; include them in scoring without changing evaluation state; compare extraction freshness against the derived article hash; immediately compute a new rank version inside story/article upserts.
+**Why:** Stale rows otherwise disappear from scoring eligibility and can make queue projection fail its active-recommendation invariant. Source and output versions answer different questions and cannot be substituted for one another.
+**Trade-offs:** Repository upserts own additional transactional queue writes. Rows temporarily retain an older rank namespace as pending entries, and complete reprojection remains necessary to publish one new canonical ordering.
+**Revisit if:** Queue projections become fully version-immutable or ingestion/result composition gains an equivalent atomic invalidation owner.
+
+---
+
+## 2026-10-28 — HN wire-attempt and dispatch boundaries
+**Chosen:** Walk authenticated GET redirects manually with one throttle reservation per hop, and define POST dispatch conservatively as invocation of `HttpClient.request`. Map every upstream HTTP error explicitly; after invocation, unresolved failures remain indeterminate even if the client later proves no wire I/O occurred.
+**Alternatives:** Use automatic same-origin redirects; claim a physical transport-started boundary without an upstream callback; propagate raw client-closed errors after POST invocation.
+**Why:** No-retry alone does not make throttling exact because redirects add wire requests. The HTTP client exposes no dispatch acknowledgment, so a conservative invocation boundary is truthful about uncertainty without inventing transport evidence.
+**Trade-offs:** The account adapter owns a bounded redirect walker and can record indeterminate for a POST that never reached the socket. This is intentionally cautious and requires reconciliation rather than optimistic success.
+**Revisit if:** The transport exposes a reliable dispatch acknowledgment or account throttling is redefined in high-level rather than wire-attempt units.
+
+---
+
+## 2026-10-29 — Explicit current-profile selection
+**Chosen:** Store one mutable `current_profile` pointer to immutable profile history and set it whenever personalization selects a new or reused version. `profiles.current()` reads only that pointer.
+**Alternatives:** Select the latest `(createdAt,id)`; rewrite an older profile's timestamp on reuse; keep an in-memory override; fail every historical reversion with `profile-current-conflict`.
+**Why:** Reverting rules/activity/policy/builder inputs can select an existing older profile. Creation order cannot represent that choice, and rewriting immutable history would break provenance and deterministic identity.
+**Trade-offs:** The store gains a fifteenth reader-owned table and every profile-selection transaction must move the pointer. Selection time is operational metadata rather than part of profile identity.
+**Revisit if:** Multiple independently active profiles become a supported product feature rather than one current profile per installation.
+
+---
+
+## 2026-10-29 — Composite reader versions and conditional article writes
+**Chosen:** Store `ARTICLE_READER_VERSION = article-reader-v1:<upstream extractor version>` on ready articles and use it for re-extraction selection. Make article upsert compare its source story version atomically and return `applied` or `stale-source`. Source/article changes invalidate stale scored or failed evaluations; terminal failed articles are not retried merely for lacking an extractor version.
+**Alternatives:** Store only the upstream extractor version; re-read then unconditionally overwrite; add a separate reader-version column; retry every failed article during routine work selection.
+**Why:** Reader-owned wrapping/mapping also affects output, and a pre-write re-read does not close the race with story refresh. The active durable job already owns retryability/backoff, so a missing successful extractor version is not itself new work.
+**Trade-offs:** Reader policy changes require an explicit version-marker bump. Store upserts own source comparison and queue effects, and callers must handle stale-source as discarded work rather than a persisted failure.
+**Revisit if:** Reader/extractor versions are split into independently migrated persisted fields or retry scheduling moves outside the active job contract.
+
+---

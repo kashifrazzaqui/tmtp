@@ -20,17 +20,17 @@ All values are bound parameters. Queries use the indexes documented in the archi
 
 Queue pagination has two layers. `queue` encodes/decodes a versioned opaque cursor; `reader-store` receives its decoded rank version, evaluation section, optional rank position, and story ID. SQL then applies the corresponding keyset predicate. The store never parses transport strings and never imports queue policy.
 
-The active recommendation is resolved through `queue_entries.recommendation_id`. Created-time latest queries exist for history/debugging only, avoiding accidental explanation drift when several profiles coexist. Activity reduction uses the latest active-or-terminal session, not an active-only lookup. Interest building reads `latestWindow` and `latestVersion` separately so an empty zero-sized suffix still carries the actual log version.
+The active recommendation is resolved through `queue_entries.recommendation_id`. Created-time latest queries exist for history/debugging only, avoiding accidental explanation drift when several profiles coexist. The current profile is a singleton pointer, so selecting an older immutable profile survives restart without changing its timestamp or contents. Activity reduction uses the latest active-or-terminal session, not an active-only lookup. Interest building reads `latestWindow` and `latestVersion` separately so an empty zero-sized suffix still carries the actual log version. Account reconciliation uses observation-keyed state reads and filtered intent keysets rather than scanning unrelated history.
 
 ## JSON and immutable data
 
 JSON columns hold genuinely variable evidence, raw source envelopes, policy snapshots, and payloads. Core filtering fields remain relational. Deserialization follows `JSON.parse → domain schema → owning library parser` as applicable. Serialization is deterministic at producer boundaries so idempotent comparisons and version hashes are stable.
 
-Immutability is enforced by repository APIs rather than database triggers: no update method exists for events, profiles, recommendations, or LLM audits. Exact duplicate inserts support at-least-once retries; conflicting duplicates fail loudly. Producers derive deterministic IDs for logical recommendation results.
+Immutability is enforced by repository APIs rather than database triggers: no update method exists for events, profiles, recommendations, or LLM audits. The separate current-profile pointer is mutable selection, not profile mutation. Exact duplicate inserts support at-least-once retries; conflicting duplicates fail loudly. Producers derive deterministic IDs for logical recommendation results.
 
 ## Transaction composition
 
-The store exposes the shared synchronous transaction helper. Application compositions, not individual repository methods, define multi-aggregate boundaries. For example, activity append + session projection + profile-job enqueue is one outer transaction, with queue enqueue using a nested savepoint. External calls always happen before a result transaction or after an intent transaction.
+The store exposes the shared synchronous transaction helper. Application compositions define cross-aggregate boundaries such as activity append + session projection + profile-job enqueue, with queue enqueue using a nested savepoint. Story/article upserts also open or join a transaction for their store-owned compare-and-invalidate writes: article source comparison, article write, and queue invalidation are atomic even when no outer caller transaction exists. External calls always happen before a result transaction or after an intent transaction.
 
 Repository methods do not start external work, await, or silently catch a failed write. SQLite foreign keys and unique constraints back the domain invariants, while store errors translate expected conflicts.
 

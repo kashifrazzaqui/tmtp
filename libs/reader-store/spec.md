@@ -66,11 +66,13 @@ export interface StoryRepository {
 }
 
 export interface ArticleRepository {
-  upsert(article: import("@tmtp/domain").Article): void;
+  upsert(article: import("@tmtp/domain").Article): ArticleUpsertResult;
   byStoryId(storyId: number): import("@tmtp/domain").Article | undefined;
   byStoryIds(storyIds: number[]): import("@tmtp/domain").Article[];
   needingContent(query: ArticleContentQuery): import("@tmtp/domain").Story[];
 }
+
+export type ArticleUpsertResult = "applied" | "stale-source";
 
 export interface ArticleContentQuery {
   extractorVersion: string;
@@ -79,7 +81,7 @@ export interface ArticleContentQuery {
 }
 ```
 
-Story upsert preserves `firstSeenAt`, reading state, queued time, visibility, and immutable history. When `Story.contentVersion` changes, the same transaction moves any existing scored queue row to `pending`, clears recommendation/rank score/rank position/error, retains its prior rank version until complete reprojection, and advances queue update time without moving it backward. Article upsert requires both a non-empty `sourceContentVersion` and `contentVersion === domain.articleContentVersion(article)`; a changed derived article version performs the same atomic stale-score invalidation. Thus `needingScoring` sees every stale row as pending/failed and returns those with no immutable recommendation for the exact `(profile,storyContent,currentArticleContent,prompt,model)` key, comparing the stored article version or logical `none` in SQL. `needingContent` includes URL and self-text stories whose article is absent/pending, whose `article.sourceContentVersion` differs from `story.contentVersion`, or whose stored `extractorVersion` differs from the query's current version; it never deletes failed content. The extractor version is a non-empty string and results are story-ID keyset ordered.
+Story upsert preserves `firstSeenAt`, reading state, queued time, visibility, and immutable history. When `Story.contentVersion` changes, the same transaction moves any existing scored/failed queue row to `pending`, clears recommendation/rank score/rank position/error, retains its prior rank version until complete reprojection, and advances queue update time without moving it backward. Article upsert requires both a non-empty `sourceContentVersion` and `contentVersion === domain.articleContentVersion(article)`. In the same transaction it reads the current story: a missing story is `not-found`; a source-version mismatch returns `stale-source` without changing the article or queue; otherwise it writes and returns `applied`. A changed derived article version performs the same atomic stale-evaluation invalidation. Thus an older read cannot overwrite a newer story attempt, and `needingScoring` sees every stale row as pending/failed and returns those with no immutable recommendation for the exact `(profile,storyContent,currentArticleContent,prompt,model)` key, comparing the stored article version or logical `none` in SQL. `needingContent` includes URL and self-text stories whose article is absent/pending, whose `article.sourceContentVersion` differs from `story.contentVersion`, or whose **ready** article's `extractorVersion` differs from the query's current reader-pipeline version. A terminal failed article is not selected merely because its extractor version is absent; its active durable job already applied retry/backoff, and later source/pipeline changes make it eligible again. The extractor version is a non-empty string and results are story-ID keyset ordered.
 
 ### Activity and sessions
 
@@ -135,6 +137,7 @@ export interface RecommendationVersionCursor {
 
 export interface ProfileRepository {
   insert(profile: import("@tmtp/domain").InterestProfile): void;
+  setCurrent(profileId: string, selectedAt: string): import("@tmtp/domain").InterestProfile;
   byId(id: string): import("@tmtp/domain").InterestProfile | undefined;
   byVersion(key: ProfileVersionKey): import("@tmtp/domain").InterestProfile | undefined;
   current(): import("@tmtp/domain").InterestProfile | undefined;
@@ -142,7 +145,7 @@ export interface ProfileRepository {
 }
 ```
 
-Rules are returned in canonical `(kind,effect,normalizedValue)` order. `replaceAll` replaces the complete rule set in the caller's transaction and returns its canonical rules version; it does not create a profile or queue jobs itself. Profiles are immutable. Inserting an identical existing ID/version is a no-op; conflicting immutable content throws `immutable-conflict`. `current` is the latest `(createdAt,id)` profile.
+Rules are returned in canonical `(kind,effect,normalizedValue)` order. `replaceAll` replaces the complete rule set in the caller's transaction and returns its canonical rules version; it does not create a profile or queue jobs itself. Profiles are immutable. Inserting an identical existing ID/version is a no-op; conflicting immutable content throws `immutable-conflict`. `setCurrent` moves the singleton current-profile pointer to any existing historical profile and records `selectedAt`; a missing ID is `not-found`. It returns the selected record and can therefore make a reused older version current again. `current` reads only that pointer, never latest creation order. The profile-building transaction must insert/reuse and then set the pointer before projection or job enqueue.
 
 ### Recommendations
 
@@ -245,22 +248,33 @@ export interface HnActionRepository {
   byIdempotencyKey(key: string): import("@tmtp/domain").HnActionIntent | undefined;
   updateOutcome(intent: import("@tmtp/domain").HnActionIntent): void;
   historyForStory(storyId: number, limit: number): import("@tmtp/domain").HnActionIntent[];
-  pendingOrIndeterminate(limit: number): import("@tmtp/domain").HnActionIntent[];
+  pendingOrIndeterminate(query: HnActionQuery): import("@tmtp/domain").HnActionIntent[];
+}
+
+export interface HnActionQuery {
+  status?: "pending" | "indeterminate";
+  storyId?: number;
+  action?: import("@tmtp/domain").HnActionKind;
+  afterId?: string;
+  limit: number;
 }
 
 export interface HnAccountStateRepository {
   upsertObservations(states: import("@tmtp/domain").HnAccountState[]): void;
   current(username: string, kind?: import("@tmtp/domain").HnActionKind): import("@tmtp/domain").HnAccountState[];
+  byStoryIds(username: string, kind: import("@tmtp/domain").HnActionKind, storyIds: number[]): import("@tmtp/domain").HnAccountState[];
 }
 ```
 
 `finishRun` updates only the named run and requires a terminal status/completion time. `recentRuns` and `llmCalls.recent` are descending `(startedAt,id)` and `(createdAt,id)` keyset pages respectively; cursor `timestamp` names the corresponding record field and results resume strictly before it. LLM calls are immutable audits; every retry attempt is inserted separately. Access sessions store hashes only and satisfy access-control's structural session-store port. HN idempotency keys are unique. Outcome updates may move `pending` to any terminal attempt state and may enrich an `indeterminate` record through reconciliation; they never turn failure into success without new result evidence.
 
+`hnActions.pendingOrIndeterminate` is ascending `(createdAt,id)` with optional exact status/story/action filters and an `afterId` keyset position. Account reconciliation uses exact story/action plus `status="indeterminate"`, so unrelated pending history cannot hide a matching candidate. `hnAccountStates.byStoryIds` resolves only the supplied unique positive IDs for one username/kind and returns story-ID order; an empty list returns no rows. Reconciliation uses this observation-bounded read instead of scanning all current account history.
+
 `diagnostics.recentErrors` is a bounded descending `(occurredAt,id)` union projection over store-owned ingestion runs, LLM audits, and HN action intents with stable error codes. It does not read the job table or require a new diagnostic table. IDs are source-prefixed (`ingestion:<runId>`, `llm:<callId>`, `hn-action:<intentId>`); components are fixed; occurrence is run completion/start, call creation, or intent update. Correlation IDs are copied where owned and arbitrary messages are omitted. Diagnostics merges this page with failed-job projections from `job-queue` before applying the same ordering key.
 
 ## Persistence and validation contract
 
-- `readerStoreMigrations` creates the 14 reader/access/ingestion tables documented in `docs/architecture.md`; the jobs table and migration ledger are owned elsewhere.
+- `readerStoreMigrations` creates the 15 reader/access/ingestion tables documented in `docs/architecture.md`, including the singleton current-profile pointer; the jobs table and migration ledger are owned elsewhere.
 - Repository rows are mapped explicitly between SQLite booleans/nulls and domain booleans/optionals.
 - Every persisted JSON value is decoded and validated by the corresponding domain schema before return. Kind-specific payload/policy validation remains with its owning library.
 - List/history limits are positive and bounded by the caller's component policy, except `latestWindow(0)`, which is the explicit empty-suffix case for a zero activity budget. Story/article/activity/profile/recommendation/sync/LLM lists are deterministic and keyset- or indexed-ordered.
@@ -301,6 +315,7 @@ None. Retention is indefinite by default; any future retention policy requires n
 - Verify queue pages include pending/failed/blacklisted-by-request entries with stable keyset order and no duplicates or omissions.
 - Verify ranking never resets reading state, preference-driven visibility changes persist, and immutable history cannot be overwritten.
 - Verify story/article version changes atomically invalidate stale scored rows into reachable pending rows, extraction queries compare the stored source story version, and pending/failed-only evaluation writes clear all scored fields.
+- Verify conditional article upserts reject stale sources without writes, historical profiles can become current again after restart, and account reconciliation reads only keyed states/intents with stable pagination.
 - Verify latest-session lookup includes terminal sessions, newest-activity windows remain contiguous at zero/exact/over-limit sizes, and content queries detect stale extractor versions as well as changed source content.
 - Verify expired/revoked access sessions and indeterminate HN outcomes remain inspectable without exposing raw secrets.
 - Verify every debug read is bounded and keyset ordered, derived error IDs remain stable across retries, and no diagnostic union reads the job table or creates another persisted history.
