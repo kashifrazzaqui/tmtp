@@ -135,6 +135,10 @@ export interface ActivityEvent {
   receivedAt: IsoDateTime;
 }
 
+export interface StoredActivityEvent extends ActivityEvent {
+  sequence: number; // store-assigned positive safe integer, strictly increasing on insertion
+}
+
 export type ReadingSessionState = "active" | "complete" | "abandoned";
 
 export interface ReadingSession {
@@ -151,9 +155,9 @@ export interface ReadingSession {
 }
 ```
 
-`sourceContentVersion` records the exact `Story.contentVersion` used for the current extraction attempt and is independent of the derived output/input version. `articleContentVersion` is the single article-input identity used by scoring, storage, and queue activation. An absent article returns `"none"`. Pending/failed records hash only their status because their stale content is not a scoring input. A ready record hashes a fixed-order JSON projection of `{ status, title: title ?? null, byline: byline ?? null, excerpt: excerpt ?? null, contentHash, extractorVersion }`; the result is `"av1." + sha256(UTF8(JSON.stringify(projection)))` with lowercase hexadecimal output. Ready records require non-empty `contentHash` and `extractorVersion`. Every stored `Article.contentVersion` must equal `articleContentVersion(article)`. Raw article text, source/final URLs, errors, source story version, and timestamps do not enter the derived version because `contentHash` identifies extracted text, the story has its own version in recommendation identity, and the other fields identify the remaining prompt input.
+`sourceContentVersion` records the exact `Story.contentVersion` used for the current extraction attempt and is independent of the derived output/input version. `articleContentVersion` is the single article-input identity used by scoring, storage, and queue activation. An absent article returns `"none"`. Pending/failed records hash only their status because their stale content is not a scoring input. A ready record hashes a fixed-order JSON projection of `{ status, title: title ?? null, byline: byline ?? null, excerpt: excerpt ?? null, contentHash, extractorVersion }`; the result is `"av1." + sha256(UTF8(JSON.stringify(projection)))` with lowercase hexadecimal output. Ready and failed records require a non-empty `extractorVersion`; on failure it identifies the attempted reader pipeline, not successful extraction. Ready records additionally require non-empty `contentHash`. Every stored `Article.contentVersion` must equal `articleContentVersion(article)`. Raw article text, source/final URLs, errors, source story version, attempted pipeline version on an unchanged failed status, and timestamps do not enter the derived version because `contentHash` identifies extracted text, the story has its own version in recommendation identity, and the other fields identify the remaining prompt input.
 
-Activity is immutable after insertion. `clientEventId` is globally unique for idempotency. A session is a mutable projection and may be rebuilt from events. `original-page` and `hn-reconciliation` observations are always `partial`.
+Activity is immutable after insertion. `clientEventId` is globally unique for idempotency. `StoredActivityEvent.sequence` is assigned only by reader-store and provides append ordering/head identity; it is not part of logical replay comparison or activity weights. A session is a mutable projection and may be rebuilt from events. `original-page` and `hn-reconciliation` observations are always `partial`.
 
 ### Preferences and interest profiles
 
@@ -382,6 +386,7 @@ export const HnItemSchema: import("zod").ZodType<HnItem>;
 export const StorySchema: import("zod").ZodType<Story>;
 export const ArticleSchema: import("zod").ZodType<Article>;
 export const ActivityEventSchema: import("zod").ZodType<ActivityEvent>;
+export const StoredActivityEventSchema: import("zod").ZodType<StoredActivityEvent>;
 export const ReadingSessionSchema: import("zod").ZodType<ReadingSession>;
 export const PreferenceRuleSchema: import("zod").ZodType<PreferenceRule>;
 export const InterestProfileSchema: import("zod").ZodType<InterestProfile>;
@@ -428,6 +433,7 @@ None.
 - Parse every valid record and reject invalid timestamps, unsafe IDs, unknown keys, invalid unions, NaN/infinite numbers, and broken state-field invariants.
 - Verify optional payload/version pairs and leased-job fields as paired values.
 - Verify type-less HN tombstones, ready-article requirements, and independent golden article-content versions for missing/pending/failed/ready records and every projected metadata change.
+- Verify failed articles retain attempted pipeline provenance and stored activity events add positive sequence without changing logical event identity.
 - Verify recommendation identity includes the article version and diagnostic errors have stable IDs without requiring messages.
 - Verify blacklist/read history and immutable-record types remain distinct.
 - Round-trip every persisted record through its schema without changing meaning.

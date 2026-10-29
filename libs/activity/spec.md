@@ -103,7 +103,7 @@ export function reduceActivity(
   previousSession: import("@tmtp/domain").ReadingSession | undefined,
   policy: ActivityPolicy,
   clock: import("@tmtp/clock").Clock,
-  existingEvents?: readonly import("@tmtp/domain").ActivityEvent[],
+  existingEvents?: readonly import("@tmtp/domain").StoredActivityEvent[],
 ): ActivityReduction;
 ```
 
@@ -167,7 +167,7 @@ Invalid or missing policy fields throw `invalid-policy` before observation reduc
 
 A violation throws `invalid-previous-session`. Supplying an older session when a later projection exists violates the caller contract because it can fork the projection.
 
-For an empty batch, `previousSession` must be `undefined`; any supplied session throws `invalid-previous-session`. `existingEvents` defaults to an empty array and supplies the persisted record for each input `clientEventId` that is already present. Every supplied record must satisfy the domain event schema, this package's kind/source/value rules, deterministic event ID rule, and reconciliation timing rule. Records must have unique client IDs and correspond to an input row. Invalid, duplicate, unrelated, or nonempty-for-an-empty-batch replay records throw `invalid-replay`.
+For an empty batch, `previousSession` must be `undefined`; any supplied session throws `invalid-previous-session`. `existingEvents` defaults to an empty array and supplies the persisted record for each input `clientEventId` that is already present. Every supplied record must satisfy the stored-event schema, including its positive store sequence, this package's kind/source/value rules, deterministic event ID rule, and reconciliation timing rule. Records must have unique client IDs and correspond to an input row. Invalid, duplicate, unrelated, or nonempty-for-an-empty-batch replay records throw `invalid-replay`. Sequence is persistence metadata only and is ignored for logical replay comparison.
 
 The caller normally obtains these records and the latest session inside the same synchronous store transaction used for the writes. Omitting a record that actually exists is detectable by the store's unique constraint, but the one-writer transaction contract exists to prevent that race.
 
@@ -287,7 +287,7 @@ The pure functions have no shared mutable state and are safe to interleave. Pers
 2. Open one `reader-store.transaction` on the shared connection.
 3. Read every persisted event matching an input client ID and read the latest session for the story, active or terminal.
 4. Call `reduceActivity` with that replay set and session. Perform no `await` in the transaction.
-5. Append only `reduction.events` with `appendIdempotent`. Require its newly inserted count to equal `reduction.events.length`; a short insert proves an incomplete replay read and must throw before any session/job write so the transaction rolls back. Then upsert every `reduction.sessions` in order and enqueue profile work only when at least one novel event exists.
+5. Append only `reduction.events` with `appendIdempotent`; reader-store assigns each newly inserted row its durable increasing sequence. Require the newly inserted count to equal `reduction.events.length`; a short insert proves an incomplete replay read and must throw before any session/job write so the transaction rolls back. Then upsert every `reduction.sessions` in order and enqueue profile work only when at least one novel event exists, using the post-append sequence head as its activity version.
 6. Commit events, all session writes, and profile-work enqueue together. Return `accepted = reduction.events.length`; exact and partial retries therefore report only newly accepted events.
 
 On the target single-process, one-connection writer topology, this synchronous critical section linearizes concurrent activity calls. Unique `client_event_id` and `last_client_event_id` constraints are backstops, not a substitute for replay preclassification. A failure rolls back all writes. External HN/LLM calls, timers, and Promise-returning work are forbidden inside the transaction.
@@ -354,6 +354,7 @@ Tests use the public API and `createFixedClock`; reducer tests need no global mo
 - `should set reconciliation occurrence equal to receipt and always mark original-page and reconciliation partial`.
 - `should return only novel events when persisted and in-batch exact replays are present`.
 - `should ignore receipt time when comparing a replay and reject any changed logical content`.
+- `should accept stored replay sequences while excluding them from logical identity and rejecting malformed stored sequence metadata`.
 - `should make a full retry produce zero events, zero session updates, and no clock read`.
 - `should treat an empty batch as a no-op and reject nonempty previous-session or replay inputs`.
 - `should apply only novel dwell in a partial retry so dwell is not doubled`.

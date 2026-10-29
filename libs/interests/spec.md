@@ -16,7 +16,7 @@ export const INTERESTS_POLICY_SCHEMA_VERSION: 1;
 
 export interface ProfileBuild {
   rules: readonly import("@tmtp/domain").PreferenceRule[];
-  activity: readonly import("@tmtp/domain").ActivityEvent[];
+  activity: readonly import("@tmtp/domain").StoredActivityEvent[];
   stories: readonly import("@tmtp/domain").Story[];
   rulesVersion: string;
   activityVersion: string;
@@ -110,15 +110,15 @@ Malformed URLs fail only domain matching. Empty title/author fields simply do no
 
 ### Input and bounded window
 
-`rulesVersion`, `activityVersion`, and `reason` must be non-empty strings. `builtAt` must be a valid domain timestamp. `rules`, `activity`, and `stories` must have unique rule/event/story IDs respectively; duplicate rule IDs/triplets are `duplicate-rule`, while duplicate story or activity IDs are `invalid-input`.
+`rulesVersion`, `activityVersion`, and `reason` must be non-empty strings. `builtAt` must be a valid domain timestamp. `rules`, `activity`, and `stories` must have unique rule/event/story IDs respectively; duplicate rule IDs/triplets are `duplicate-rule`, while duplicate story/activity IDs or activity sequences are `invalid-input`. Every stored activity sequence is a positive safe integer.
 
-The activity candidate order is ascending `(receivedAt,id)`. Before applying `maxActivityEvents`:
+The activity candidate order is ascending store-assigned `sequence`. Before applying `maxActivityEvents`:
 
 - an empty candidate list requires `activityVersion === "0"` for an empty log; a nonempty latest-log version is valid only when `maxActivityEvents === 0` and the caller supplies the empty suffix of a nonempty log;
-- a non-empty list requires `activityVersion` to equal its last event's `id`;
+- a non-empty list requires `activityVersion` to equal the canonical decimal string of its last event's `sequence`;
 - otherwise throw `activity-version-mismatch`.
 
-Select the last `maxActivityEvents` candidates; zero selects none. The caller may supply the complete log or a contiguous suffix ending at `activityVersion`. A nonempty supplied suffix must contain the whole log or at least `maxActivityEvents` events, so either form selects the same window. `activityVersion` identifies the end of the log/window, not merely the last retained event; when zero events are selected from a nonempty log it remains the store's independent `latestVersion()`, not `"0"` or a fabricated ID. This package does not silently cap queue retention or discard stored activity.
+Select the last `maxActivityEvents` candidates; zero selects none. The caller may supply the complete log or a contiguous sequence-ordered suffix ending at `activityVersion`. Sequence numbers need not be contiguous integers because a failed/no-op insert may leave gaps; ordering and endpoint identity are contractual. A nonempty supplied suffix must contain the whole log or at least `maxActivityEvents` events, so either form selects the same window. `activityVersion` identifies the append head, not merely the last retained event or a timestamp/ID tuple; when zero events are selected from a nonempty log it remains the store's independent `latestVersion()`, not `"0"` or a fabricated ID. This package does not silently cap queue retention or discard stored activity.
 
 Every selected event must have a story in `input.stories`; otherwise throw `missing-story` with `storyId`. Stories not referenced by selected events are allowed and do not themselves create interests. Events outside the selected window do not need story features.
 
@@ -149,7 +149,7 @@ decay = 2 ^ (-(ageMs / 86_400_000) / decayHalfLifeDays)
 contribution = round12(baseWeight * qualityMultiplier * decay)
 ```
 
-Future `occurredAt` values are clamped to zero age rather than rejected or given increasing weight. `receivedAt` is used only for window ordering. Variable `event.value` payloads do not alter weights in builder `interests/1`; this avoids inventing dwell/scroll thresholds not present in the activity contract.
+Future `occurredAt` values are clamped to zero age rather than rejected or given increasing weight. Store `sequence` is used only for window ordering/head identity; neither sequence nor `receivedAt` affects decay weight. Variable `event.value` payloads do not alter weights in builder `interests/1`; this avoids inventing dwell/scroll thresholds not present in the activity contract.
 
 `round12(n)` is `Math.round(n * 1e12) / 1e12`, with negative zero normalized to positive zero. Sum per `(interestKey,kind)` in activity-window order and round the final sum to 12 decimal places. Each `InterestEvidence` contains the number of contributing selected events and this signed decayed sum. Evidence is retained even when its final weight is zero.
 
@@ -197,7 +197,7 @@ Any change to normalization, stop words, feature extraction, weights, decay, rou
 | `invalid-rule` | Invalid kind/value/normalized value, overlong normalization, or `normalizedValue` not equal to the canonical normalization |
 | `duplicate-rule` | Repeated rule ID or `(kind,effect,normalizedValue)` in the source snapshot |
 | `missing-story` | A selected activity event references no supplied story |
-| `activity-version-mismatch` | Empty candidates pair a nonempty version with a nonzero activity budget, an empty log does not use `"0"`, or nonempty candidates do not end at `activityVersion` |
+| `activity-version-mismatch` | Empty candidates pair a nonempty version with a nonzero activity budget, an empty log does not use `"0"`, or nonempty candidates do not end at the canonical decimal sequence `activityVersion` |
 
 Validation stops at the first error in deterministic input order. Expected validation failures throw `InterestError`; there is no partial profile result.
 
@@ -242,7 +242,7 @@ No evidence-weight, stop-word, seed, secret, or version key is configurable. Tho
 ### Activity and profiles
 
 - Use fixed timestamps to verify the exact decay formula at zero, one half-life, multiple half-lives, and future occurrence times. Cover every base weight and partial-observation multiplier.
-- Verify candidate ordering by `(receivedAt,id)`, exact activity-version checks, newest-N selection, zero event/topic budgets, contiguous-suffix equivalence, missing stories, duplicate IDs, and events with no features.
+- Verify candidate ordering by sequence including timestamp ties/backward clocks and ID inversions, exact decimal activity-version checks, newest-N selection, zero event/topic budgets, suffix equivalence across sequence gaps, missing stories, duplicate IDs/sequences, and events with no features.
 - Verify signed evidence counts/sums, negative-only omission, explicit-include weight pinning, exclude precedence, deterministic tie-breaking, raw-score normalization before truncation, 12-decimal rounding, and no negative zero.
 - Assert byte-equivalent profiles across input permutations that have the same canonical rule/activity/story meaning, and assert exact golden policy versions and profile IDs. Verify different policy or builder versions produce different identities.
 - Verify the complete profile satisfies the domain schema and retains the exact source-rule snapshot, policy snapshot, versions, reason, and `builtAt`.

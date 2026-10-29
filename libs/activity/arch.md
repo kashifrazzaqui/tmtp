@@ -53,7 +53,7 @@ There is no hash or random generator in this package. A one-to-one prefix mappin
 
 ### Logical comparison
 
-Build a map from `clientEventId` to the supplied persisted event. Build a second map while parsing the batch to detect conflicting in-batch duplicates. Compare fields explicitly by kind; do not use generic `JSON.stringify` equality, which would make object-key order and future fields part of idempotency accidentally.
+Build a map from `clientEventId` to the supplied stored event. Validate its positive sequence as persistence metadata but never compare that sequence for logical idempotency. Build a second map while parsing the batch to detect conflicting in-batch duplicates. Compare fields explicitly by kind; do not use generic `JSON.stringify` equality, which would make object-key order, sequence, and future fields part of idempotency accidentally.
 
 For normal events compare deterministic ID, story, kind, source, value/version, expected quality, and client occurrence. Ignore receipt. For reconciliation compare the same stable content but no occurrence/receipt timestamps; separately require the stored reconciliation event's occurrence and receipt to be equal.
 
@@ -124,7 +124,7 @@ Empty event history needs no clock and produces empty event/session arrays.
 1. Parse outside storage.
 2. In one synchronous shared-connection transaction, fetch matching replay rows and the latest story session.
 3. Reduce synchronously.
-4. Append novel events and require the inserted count to equal the novel count. A short insert means the replay read was incomplete; throw before session/job writes and roll back. Otherwise upsert all result sessions in order and enqueue profile work if novel events exist.
+4. Append novel events with store-assigned increasing sequences and require the inserted count to equal the novel count. A short insert means the replay read was incomplete; throw before session/job writes and roll back. Otherwise upsert all result sessions in order and enqueue profile work if novel events exist using the post-append sequence head.
 5. Return from the transaction to commit; propagate any error to roll back.
 
 There is no reason for this package to import a store interface for that sequence. Keeping it in the higher composition also avoids a dependency from activity to database or job-queue. The store's unique constraints remain defense in depth.
@@ -154,7 +154,7 @@ On one Node process and one synchronous SQLite writer, the transaction body cann
 - Table-drive raw fixtures by kind/source/value and include unknown keys, non-finite numbers, unsafe integers, malformed timestamps, and duplicate conflicts.
 - Use fixed valid client IDs with controlled lexicographic order to test equal-time ordering without relying on random generation.
 - Use `createFixedClock` to pin receipt and future validation. A counting clock wrapper proves replay-only calls do not read time.
-- Build previous sessions and replay events as domain-shaped fixtures; mutate returned objects afterward to prove inputs and outputs do not alias.
+- Build previous sessions and stored replay events with positive sequences as domain-shaped fixtures; mutate returned objects afterward to prove inputs and outputs do not alias and sequence does not affect replay identity.
 - Compare chunked reduction with whole-history reduction across starts, completion, skips, multiple gaps, partial quality, and equal-time events.
 - Test safe-integer dwell overflow at the exact boundary and assert no partial result.
 - Assert `batchIndex` and fixed messages for expected errors, and scan serialized errors for value/client-ID sentinels.

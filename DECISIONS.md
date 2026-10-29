@@ -485,3 +485,66 @@
 **Revisit if:** Reader/extractor versions are split into independently migrated persisted fields or retry scheduling moves outside the active job contract.
 
 ---
+
+## 2026-10-29 — One atomic result batch per ingestion run
+**Chosen:** Each public invocation selects at most one collection batch plus one refresh page, performs all HN calls first, then commits normalized stories, initial queue rows, both checkpoints, job handoffs, and the terminal run in one transaction. Bootstrap stores a bounded plan and advance uses maxitem keysets.
+**Alternatives:** Commit per item; hold a transaction across fetches; run multiple result batches under one run without running-progress writes; treat a running row as a recovery lock.
+**Why:** The existing run repository has terminal counters but no running-progress update. One result batch makes counters and checkpoints exact and prevents transient failures from committing partial batches while bounded runs preserve continuation.
+**Trade-offs:** Catch-up requires repeated invocations and a failed batch repeats already-fetched items. Pure normalization and previous-story reads occur in the commit transaction, but no external wait does.
+**Revisit if:** A running-progress repository contract supports multi-batch run accounting or measured batch latency requires a different checkpoint owner.
+
+---
+
+## 2026-10-29 — Transactional outbox for account activity
+**Chosen:** Commit first/changed HN account-state evidence with a one-story `personalization.record-activity` job containing a durable random `clientEventId` and no `occurredAt`. Reader-app routes that kind directly to `personalization.recordActivity`; activity assigns receipt-derived partial observations and replay identity.
+**Alternatives:** Call activity directly from ingestion; derive event identity from timestamps; infer transitions from list absence; regenerate IDs on worker retry; backfill unknown stories through account reads.
+**Why:** The dependency graph forbids ingestion→activity, and a direct state-then-activity call can lose the second effect. The job table is already in the same SQLite transaction and preserves retry identity without inventing historical action times.
+**Trade-offs:** Reader-app/service own another codec and special dispatch path. Unknown-story observations are visibly skipped, and unchanged observations do not produce new activity even though current-state timestamps advance.
+**Revisit if:** Account observations gain authoritative occurrence timestamps or the dependency/workflow design supplies an equivalent transactional activity port.
+
+---
+
+## 2026-10-29 — Single-writer personalization result pipeline
+**Chosen:** Serialize profile/scoring/projection operations on one instance, including across the external LLM await, while leaving activity/ingestion writes outside that mutex. Persist audits before linked judgments, recheck failure content versions, and commit audits, immutable recommendations, current failures, and one complete queue projection together. Use source-head/profile IDs for durable job dedupe and stale-job no-ops.
+**Alternatives:** Hold SQLite transactions across LLM calls; allow concurrent profile scoring; persist each story independently; rank per repository page; overwrite recommendations with the latest retry; reconstruct historical activity windows from job payloads.
+**Why:** Old-profile results must not publish after a preference change, and every active explanation must reference durable evidence. Complete projection preserves the exploration pool and one rank namespace without making provider latency block unrelated database writes.
+**Trade-offs:** One writer limits scoring throughput and complete ranking uses complete-set memory/a larger synchronous transaction. Provider work can repeat after crashes, and later independent recovery remains best-effort for failed rows rather than perfectly suppressing permanent failures.
+**Revisit if:** Multi-writer operation is required or measured queue size makes complete in-memory ranking unsustainable under the product's no-truncation invariant.
+
+---
+
+## 2026-10-29 — Append-sequence activity versions
+**Chosen:** Give every stored activity event a SQLite-assigned increasing `sequence`. Use its canonical decimal maximum for `latestVersion`, activity windows/keysets, profile identity, and job dedupe. Keep sequence out of logical replay identity, session ordering, and decay weights.
+**Alternatives:** Keep `(receivedAt,id)` as the activity head; hash the full log on every build; use an in-memory counter; include sequence as an event-idempotency field.
+**Why:** Equal-millisecond smaller IDs and backward wall clocks can insert a novel event before a timestamp/ID head, changing the window without changing its version. A durable insertion sequence advances for every append while bounded suffix reads remain simple.
+**Trade-offs:** Stored replay/window fixtures carry sequence metadata and interests now accepts stored events. SQLite can leave sequence gaps after failed/no-op work, so contracts require ordering rather than consecutive integers.
+**Revisit if:** Activity persistence gains another universally ordered append identifier with the same durability and bounded-query guarantees.
+
+---
+
+## 2026-10-29 — Active queue-projection pointer
+**Chosen:** Add a singleton `queue_projection` pointer updated atomically with every complete projection. Application reads use its rank version; ingestion places new pending rows in that version, falling back to shared bootstrap only before a nonempty projection exists.
+**Alternatives:** Keep assigning bootstrap to every new row; merge multiple rank-version cursors in reader-app; infer the active version from newest queue timestamps; store rank selection in an in-memory profile cache.
+**Why:** A single-version page cannot include existing ranked rows and later bootstrap rows without hiding one set. The pointer is durable projection metadata and preserves the existing cursor API without a cross-version merge.
+**Trade-offs:** The store gains a sixteenth reader-owned table and every projection must update rows and pointer together. Empty projections retain profile/time metadata with no rank version and use bootstrap for the next pending row.
+**Revisit if:** Queue pagination natively supports multiple independent rank namespaces or projection metadata moves into an equivalent durable owner.
+
+---
+
+## 2026-10-29 — Attempted reader versions on failed articles
+**Chosen:** Require the composite reader `extractorVersion` on failed as well as ready articles. On failure it records the attempted pipeline and is excluded from the failed status's derived content version; `needingContent` selects ready/failed version mismatches.
+**Alternatives:** Omit pipeline version on failure and limit retries to source changes/manual jobs; add a separate attempted-version column; include failed-attempt version in recommendation identity.
+**Why:** A pipeline upgrade must be able to retry an exhausted old failure, while an unchanged failed prompt input does not need a new recommendation merely because another attempt used a new pipeline.
+**Trade-offs:** Failed-article fixtures carry one more provenance field. Current-pipeline terminal failures remain excluded from routine selection until source/pipeline change or an explicit job, avoiding an endless retry loop.
+**Revisit if:** Attempted and successful pipeline provenance need independent persisted columns or failed prompt inputs begin including pipeline details.
+
+---
+
+## 2026-10-29 — Durable ingestion scheduling jobs
+**Chosen:** Give hn-ingestion two strict empty-payload version-1 job kinds, `ingestion.collect` and `ingestion.reconcile-account`, with fixed-kind active dedupe and owner enqueue/failure helpers. Reader-app registers and dispatches them; cron callbacks only enqueue, while direct methods remain for manual runs.
+**Alternatives:** Invoke collection directly from cron; define untyped service-only payloads; add a scheduler dependency to hn-ingestion; create a separate execution path for scheduled work.
+**Why:** The workflow requires scheduled collection to survive restart and use ordinary lease recovery. Owner codecs keep validation and failure mapping with ingestion, and one public-method path prevents scheduled/direct behavior from drifting.
+**Trade-offs:** The central registry grows to eight kinds and overlapping scheduler ticks coalesce into one active job per operation. Account scheduling requires configured account capability before enqueue.
+**Revisit if:** Scheduling needs run-specific payload parameters or a different durable trigger abstraction with equivalent restart and idempotency guarantees.
+
+---

@@ -20,7 +20,7 @@ A profile build has five stages:
 
 1. **Validate and index.** Parse domain records, canonicalize rule order, index stories by ID, and reject duplicate logical records before any arithmetic.
 2. **Compile and extract.** Compile enabled rules once. Extract/cache features only for stories referenced by the selected activity window. The same compiled topic/keyword rules drive features and blacklist phrase matching.
-3. **Select evidence.** Sort candidates by `(receivedAt,id)`, verify `activityVersion`, and retain the newest policy-bounded suffix. Each retained event contributes a fixed, decayed weight to every feature of its story.
+3. **Select evidence.** Sort candidates by store-assigned `sequence`, verify the canonical decimal `activityVersion` endpoint, and retain the newest policy-bounded suffix. Timestamp ties/backward clocks and random event IDs cannot change append order. Each retained event contributes a fixed, decayed weight to every feature of its story.
 4. **Reduce and normalize.** Aggregate signed evidence in canonical activity order. Apply exact-key excludes, pin explicit includes, select positive inferred candidates, and normalize retained weights without letting truncation rescale them.
 5. **Version and emit.** Snapshot policy/rules, calculate SHA-256 versions/identity, sort output arrays, and return a fresh immutable-by-convention domain profile.
 
@@ -32,7 +32,7 @@ The blacklist path is intentionally cheaper: validate the story/profile, compile
 
 All sorting uses explicit comparators and story/rule/event IDs as tie-breakers. No `localeCompare`, object-key iteration, insertion order, wall clock, or random number affects a profile. Event contributions are rounded before ordered summation and totals/final weights are rounded again. This gives stable golden values and prevents tiny floating-point tails from leaking into prompts or hashes.
 
-The profile ID hashes the repository-supplied source versions, not a JSON serialization of the complete activity log. This keeps identity computation bounded. Correctness therefore depends on the store's contract: `rulesVersion` and `activityVersion` must uniquely identify their source snapshots. The builder validates the activity version's endpoint but cannot prove a repository version's completeness.
+The profile ID hashes the repository-supplied source versions, not a JSON serialization of the complete activity log. This keeps identity computation bounded. Correctness therefore depends on the store's contract: `rulesVersion` and `activityVersion` must uniquely identify their source snapshots. A strictly increasing insertion sequence advances for every novel event even when receipt time or random ID order does not. The builder validates the activity version's endpoint but cannot prove a repository version's completeness.
 
 ### Shared lexical model
 

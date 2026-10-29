@@ -81,7 +81,7 @@ export interface ArticleContentQuery {
 }
 ```
 
-Story upsert preserves `firstSeenAt`, reading state, queued time, visibility, and immutable history. When `Story.contentVersion` changes, the same transaction moves any existing scored/failed queue row to `pending`, clears recommendation/rank score/rank position/error, retains its prior rank version until complete reprojection, and advances queue update time without moving it backward. Article upsert requires both a non-empty `sourceContentVersion` and `contentVersion === domain.articleContentVersion(article)`. In the same transaction it reads the current story: a missing story is `not-found`; a source-version mismatch returns `stale-source` without changing the article or queue; otherwise it writes and returns `applied`. A changed derived article version performs the same atomic stale-evaluation invalidation. Thus an older read cannot overwrite a newer story attempt, and `needingScoring` sees every stale row as pending/failed and returns those with no immutable recommendation for the exact `(profile,storyContent,currentArticleContent,prompt,model)` key, comparing the stored article version or logical `none` in SQL. `needingContent` includes URL and self-text stories whose article is absent/pending, whose `article.sourceContentVersion` differs from `story.contentVersion`, or whose **ready** article's `extractorVersion` differs from the query's current reader-pipeline version. A terminal failed article is not selected merely because its extractor version is absent; its active durable job already applied retry/backoff, and later source/pipeline changes make it eligible again. The extractor version is a non-empty string and results are story-ID keyset ordered.
+Story upsert preserves `firstSeenAt`, reading state, queued time, visibility, and immutable history. When `Story.contentVersion` changes, the same transaction moves any existing scored/failed queue row to `pending`, clears recommendation/rank score/rank position/error, retains its prior rank version until complete reprojection, and advances queue update time without moving it backward. Article upsert requires both a non-empty `sourceContentVersion` and `contentVersion === domain.articleContentVersion(article)`. In the same transaction it reads the current story: a missing story is `not-found`; a source-version mismatch returns `stale-source` without changing the article or queue; otherwise it writes and returns `applied`. A changed derived article version performs the same atomic stale-evaluation invalidation. Thus an older read cannot overwrite a newer story attempt, and `needingScoring` sees every stale row as pending/failed and returns those with no immutable recommendation for the exact `(profile,storyContent,currentArticleContent,prompt,model)` key, comparing the stored article version or logical `none` in SQL. `needingContent` includes URL and self-text stories whose article is absent/pending, whose `article.sourceContentVersion` differs from `story.contentVersion`, or whose ready/failed article's attempted `extractorVersion` differs from the query's current reader-pipeline version. Every terminal article carries that attempted composite version; a current-pipeline terminal failure is not selected again merely because it failed, while a later source/pipeline change makes it eligible again. The extractor version is a non-empty string and results are story-ID keyset ordered.
 
 ### Activity and sessions
 
@@ -95,22 +95,29 @@ export interface ActivityQuery {
 
 export interface ActivityRepository {
   appendIdempotent(events: import("@tmtp/domain").ActivityEvent[]): number;
-  afterVersion(version: string, limit: number): import("@tmtp/domain").ActivityEvent[];
-  latestWindow(limit: number): import("@tmtp/domain").ActivityEvent[];
+  afterVersion(version: string, limit: number): import("@tmtp/domain").StoredActivityEvent[];
+  latestWindow(limit: number): import("@tmtp/domain").StoredActivityEvent[];
   latestVersion(): string;
-  query(query: ActivityQuery): import("@tmtp/domain").ActivityEvent[];
+  query(query: ActivityQuery): import("@tmtp/domain").StoredActivityEvent[];
 }
 
 export interface ReadingSessionRepository {
   latestForStory(storyId: number): import("@tmtp/domain").ReadingSession | undefined;
   upsert(session: import("@tmtp/domain").ReadingSession): void;
-  query(query: ActivityQuery): import("@tmtp/domain").ReadingSession[];
+  query(query: ReadingSessionQuery): import("@tmtp/domain").ReadingSession[];
+}
+
+export interface ReadingSessionQuery {
+  storyId?: number;
+  clientEventId?: string; // exact lastClientEventId match
+  afterId?: string;
+  limit: number;
 }
 ```
 
-Activity ordering is `(receivedAt,id)`. `latestVersion()` returns the last event ID or `"0"` for an empty log. `afterVersion` resolves that ID to its ordering tuple and returns a bounded following page; an unknown nonempty version throws `unknown-version`. `latestWindow(limit)` returns the newest `limit` events in ascending `(receivedAt,id)` order, or the whole log when shorter; zero returns an empty suffix without changing the independent `latestVersion()` result. This gives interest building a bounded contiguous suffix without scanning the full history. Reusing a `clientEventId` with byte-equivalent domain content is an idempotent no-op; reusing it with different content throws `conflict`. `appendIdempotent` returns only newly inserted count.
+Activity append ordering is a store-assigned positive safe-integer `sequence`, independent of receipt timestamps and random event IDs. `appendIdempotent` assigns increasing sequences to newly inserted rows and returns only the newly inserted count; exact replay inserts no event and therefore does not advance the logical head. Sequence gaps are valid. `latestVersion()` returns the canonical decimal maximum sequence or `"0"` for an empty log, so every novel append advances the profile/dedupe version even when receipt time goes backward or an ID sorts earlier. `afterVersion` accepts `"0"` or a canonical positive decimal sequence no greater than the current head and returns a bounded page with greater sequence; malformed, leading-zero, unsafe, or unknown future versions throw `unknown-version`. `latestWindow(limit)` returns the newest `limit` events in ascending sequence, or the whole log when shorter; zero returns an empty suffix without changing the independent `latestVersion()` result. This gives interest building a bounded contiguous suffix in append order without scanning the full history. `ActivityQuery` returns ascending sequence pages with optional exact story/client-ID filters; its `afterId` resolves an event ID to its stored sequence, and an unknown or cross-story ID is `invalid-query`. Reusing a `clientEventId` with byte-equivalent domain content is an idempotent no-op; sequence is excluded from logical replay comparison, and different content throws `conflict`.
 
-`latestForStory` returns the latest active **or terminal** session by `(updatedAt,id)`, which is required for activity replay ordering and orphan-closer high-watermarks. Session upsert validates `lastClientEventId` idempotency and never reduces dwell/scroll accumulated by an already-applied event. Events, session projection, and profile-work enqueue are committed by the calling composition in one transaction.
+`latestForStory` returns the latest active **or terminal** session by `(updatedAt,id)`, which is required for activity replay ordering and orphan-closer high-watermarks. `ReadingSessionRepository.query` returns bounded ascending `(updatedAt,id)` pages with optional exact story/`lastClientEventId` filters. Its `afterId` resolves a session ID to that tuple and resumes strictly after it; an unknown ID or one outside the requested story is `invalid-query`. Event and session IDs/cursors are never interchangeable. Session upsert validates `lastClientEventId` idempotency and never reduces dwell/scroll accumulated by an already-applied event. Events, session projection, and profile-work enqueue are committed by the calling composition in one transaction.
 
 ### Preferences and profiles
 
@@ -186,6 +193,12 @@ export interface QueuePageQuery {
   limit: number;
 }
 
+export interface QueueProjectionState {
+  profileId: string;
+  rankVersion?: string; // absent only for a complete empty projection
+  projectedAt: string;
+}
+
 export interface QueueRepository {
   insertPendingIfMissing(entries: import("@tmtp/domain").QueueEntry[]): number;
   upsertRankingPreservingState(entries: import("@tmtp/domain").QueueEntry[]): void;
@@ -201,12 +214,16 @@ export interface QueueRepository {
   page(query: QueuePageQuery): import("@tmtp/domain").QueueEntry[];
   countsByEvaluationState(input?: { visibilityState?: import("@tmtp/domain").VisibilityState; rankVersion?: string }): Record<string, number>;
   forReprojection(afterStoryId: number | undefined, limit: number): import("@tmtp/domain").QueueEntry[];
+  projection(): QueueProjectionState | undefined;
+  setProjection(state: QueueProjectionState): void;
 }
 ```
 
 Default pages include visible entries only; history queries may explicitly include blacklisted entries. Ordering is `scored` by `(rankPosition,storyId)`, then `pending` by `storyId`, then `failed` by `storyId`, within one `rankVersion` and the requested filters. `after` must match the query's rank version and evaluation filter. This total order covers unranked initial entries and has no silent cap.
 
 Ranking writes preserve `state` and `queuedAt`, while persisting the visibility and ranking fields computed for the new profile. Thus a preference/blacklist change can hide or reveal a row without rewriting its reading history. `updateState` throws `not-found` and otherwise returns the updated row. `markEvaluation` accepts only pending/failed, clears recommendation/rank score/rank position, sets the supplied rank version/error, and never changes reading state; scored rows are written only as complete `upsertRankingPreservingState` projections. Queue state transitions themselves are validated by `queue` before persistence.
+
+`projection` is the singleton active-rank pointer for application pagination and ingestion. `setProjection` updates it in the same transaction as the complete ranked rows, recording the selected profile and not-before projection time; a valid empty projection stores an absent `rankVersion`. Before any projection exists, application/ingestion use `QUEUE_BOOTSTRAP_RANK_VERSION`. Once a nonempty pointer exists, newly inserted pending rows join that rank version rather than creating a second bootstrap namespace. The pointer is projection metadata, not a second ranking algorithm or queue history.
 
 ### Sync, LLM audits, access, and HN records
 
@@ -247,7 +264,7 @@ export interface HnActionRepository {
   byId(id: string): import("@tmtp/domain").HnActionIntent | undefined;
   byIdempotencyKey(key: string): import("@tmtp/domain").HnActionIntent | undefined;
   updateOutcome(intent: import("@tmtp/domain").HnActionIntent): void;
-  historyForStory(storyId: number, limit: number): import("@tmtp/domain").HnActionIntent[];
+  historyForStory(storyId: number, afterId: string | undefined, limit: number): import("@tmtp/domain").HnActionIntent[];
   pendingOrIndeterminate(query: HnActionQuery): import("@tmtp/domain").HnActionIntent[];
 }
 
@@ -270,11 +287,13 @@ export interface HnAccountStateRepository {
 
 `hnActions.pendingOrIndeterminate` is ascending `(createdAt,id)` with optional exact status/story/action filters and an `afterId` keyset position. Account reconciliation uses exact story/action plus `status="indeterminate"`, so unrelated pending history cannot hide a matching candidate. `hnAccountStates.byStoryIds` resolves only the supplied unique positive IDs for one username/kind and returns story-ID order; an empty list returns no rows. Reconciliation uses this observation-bounded read instead of scanning all current account history.
 
+`hnActions.historyForStory` is also ascending `(createdAt,id)`, restricted to one story and bounded by limit. Its optional `afterId` resolves the durable intent's tuple and resumes strictly after it; an unknown ID or one belonging to another story is `invalid-query`, never a cross-story continuation.
+
 `diagnostics.recentErrors` is a bounded descending `(occurredAt,id)` union projection over store-owned ingestion runs, LLM audits, and HN action intents with stable error codes. It does not read the job table or require a new diagnostic table. IDs are source-prefixed (`ingestion:<runId>`, `llm:<callId>`, `hn-action:<intentId>`); components are fixed; occurrence is run completion/start, call creation, or intent update. Correlation IDs are copied where owned and arbitrary messages are omitted. Diagnostics merges this page with failed-job projections from `job-queue` before applying the same ordering key.
 
 ## Persistence and validation contract
 
-- `readerStoreMigrations` creates the 15 reader/access/ingestion tables documented in `docs/architecture.md`, including the singleton current-profile pointer; the jobs table and migration ledger are owned elsewhere.
+- `readerStoreMigrations` creates the 16 reader/access/ingestion tables documented in `docs/architecture.md`, including the singleton current-profile and queue-projection pointers; the jobs table and migration ledger are owned elsewhere.
 - Repository rows are mapped explicitly between SQLite booleans/nulls and domain booleans/optionals.
 - Every persisted JSON value is decoded and validated by the corresponding domain schema before return. Kind-specific payload/policy validation remains with its owning library.
 - List/history limits are positive and bounded by the caller's component policy, except `latestWindow(0)`, which is the explicit empty-suffix case for a zero activity budget. Story/article/activity/profile/recommendation/sync/LLM lists are deterministic and keyset- or indexed-ordered.
@@ -313,9 +332,12 @@ None. Retention is indefinite by default; any future retention policy requires n
 - Verify duplicate activity, story upsert, profile/recommendation retry, HN intent, and active dedupe behavior.
 - Prove activity/session/job and ingestion/queue/job handoffs roll back together when any write fails.
 - Verify queue pages include pending/failed/blacklisted-by-request entries with stable keyset order and no duplicates or omissions.
+- Verify new pending rows and application reads share the active projection pointer after ingestion, while bootstrap is used only before the first complete projection.
 - Verify ranking never resets reading state, preference-driven visibility changes persist, and immutable history cannot be overwritten.
-- Verify story/article version changes atomically invalidate stale scored rows into reachable pending rows, extraction queries compare the stored source story version, and pending/failed-only evaluation writes clear all scored fields.
+- Verify story/article version changes atomically invalidate stale scored/failed rows into reachable pending rows, extraction queries compare the stored source story version, and pending/failed-only evaluation writes clear all scored fields.
 - Verify conditional article upserts reject stale sources without writes, historical profiles can become current again after restart, and account reconciliation reads only keyed states/intents with stable pagination.
 - Verify latest-session lookup includes terminal sessions, newest-activity windows remain contiguous at zero/exact/over-limit sizes, and content queries detect stale extractor versions as well as changed source content.
+- Verify append sequence heads advance for same-millisecond smaller-ID and backward-clock inserts, remain unchanged on exact replay, and drive ordered suffix/keyset reads across valid sequence gaps.
+- Verify event sequence, session `(updatedAt,id)`, and HN-intent `(createdAt,id)` pages resume independently with exact client/story filters and reject unknown or cross-story continuation IDs.
 - Verify expired/revoked access sessions and indeterminate HN outcomes remain inspectable without exposing raw secrets.
 - Verify every debug read is bounded and keyset ordered, derived error IDs remain stable across retries, and no diagnostic union reads the job table or creates another persisted history.
