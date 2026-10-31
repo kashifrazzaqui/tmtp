@@ -6,6 +6,11 @@
   "engines": {
     "node": ">=24.15 <25"
   },
+  "scripts": {
+    "build": "pnpm --recursive --workspace-concurrency=1 build",
+    "test": "pnpm --recursive --workspace-concurrency=1 test",
+    "typecheck": "pnpm --recursive --workspace-concurrency=1 typecheck"
+  },
   "devDependencies": {
     "@types/node": "catalog:",
     "typescript": "catalog:",

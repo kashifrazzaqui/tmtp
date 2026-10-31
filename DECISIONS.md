@@ -611,3 +611,21 @@
 **Revisit if:** Audit persistence moves to a shared owner with equivalent validation, immutable reuse, and transaction semantics.
 
 ---
+
+## 2026-10-31 — Inert DOM resources on pinned jsdom 30
+**Chosen:** Use jsdom's default no-resource-loading mode for source and fragment documents and verify it with a real loopback network trap.
+**Alternatives:** Use the removed `ResourceLoader` export; enable jsdom resources and block them through request interception; trust script disabling without a network test.
+**Why:** Pinned jsdom 30.1.3 no longer exports `ResourceLoader`. Its default configuration neither executes page scripts nor loads subresources, and the extraction tests prove that no loopback requests occur.
+**Trade-offs:** The implementation relies on jsdom's documented default rather than a custom loader object. Upgrades must retain the network-trap test and review resource-policy changes.
+**Revisit if:** A future jsdom version changes default resource behavior or requires an explicit supported no-load adapter.
+
+---
+
+## 2026-10-31 — Logger-owned child binding snapshots
+**Chosen:** Keep immutable field snapshots in the logger facade and serialize them with the current secret inventory at each enabled record boundary rather than delegating child binding serialization to Pino.
+**Alternatives:** Use Pino child loggers directly; rebuild logger children whenever a session secret changes; retain all runtime secrets statically.
+**Why:** Pino prepares child bindings before later runtime secrets can be redacted. Facade-owned snapshots preserve child precedence while allowing one provider snapshot to cover bindings, fields, service text, messages, and errors consistently.
+**Trade-offs:** The facade owns a small amount of merge logic that Pino could otherwise provide. Public behavior remains the same, but child serialization and reserved-key tests are mandatory.
+**Revisit if:** Pino supports deferred binding serialization with equivalent dynamic redaction and no-accessor guarantees.
+
+---
