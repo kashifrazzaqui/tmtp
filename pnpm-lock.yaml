@@ -253,6 +253,10 @@ importers:
       '@tmtp/reader-store':
         specifier: workspace:*
         version: link:../reader-store
+    devDependencies:
+      '@tmtp/database':
+        specifier: workspace:*
+        version: link:../database
 
   libs/hn-public-api:
     dependencies:
@@ -342,6 +346,10 @@ importers:
       '@tmtp/recommendations':
         specifier: workspace:*
         version: link:../recommendations
+    devDependencies:
+      '@tmtp/database':
+        specifier: workspace:*
+        version: link:../database
 
   libs/queue:
     dependencies:
