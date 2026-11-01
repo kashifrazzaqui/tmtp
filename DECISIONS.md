@@ -629,3 +629,12 @@
 **Revisit if:** Pino supports deferred binding serialization with equivalent dynamic redaction and no-accessor guarantees.
 
 ---
+
+## 2026-11-01 — Same-origin metadata fallback for debug GET requests
+**Chosen:** User decision: after session and CSRF checks, debug GET/SSE accepts an absent `Origin` only with `Sec-Fetch-Site: same-origin`. All mutations and logout still require exact `Origin`.
+**Alternatives:** Require literal `Origin` and leave ordinary browser debug GET/SSE unusable; redesign the debug transport and its contract.
+**Why:** Browsers omit `Origin` on ordinary same-origin GET requests. Fetch metadata preserves same-origin evidence without weakening mutation protection or allowing missing/cross-site metadata.
+**Trade-offs:** The debug policy has a narrow second proof of origin. Clients without Fetch Metadata must send explicit `Origin`; older or unusual user agents may need that explicit header path.
+**Revisit if:** Browser Origin behavior changes or the debug transport is redesigned with a different CSRF/origin contract.
+
+---

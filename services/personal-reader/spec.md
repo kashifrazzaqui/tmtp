@@ -139,9 +139,9 @@ All state-changing cookie-authenticated routes, logout, and both debug routes pe
 
 1. await `authenticate(opaqueSession)`;
 2. require the `x-tmtp-csrf` header and await `verifyCsrf` on that fresh session snapshot;
-3. require an exact allowed `Origin` and reject a present cross-site `Sec-Fetch-Site` value.
+3. require an exact allowed `Origin` and reject a present cross-site `Sec-Fetch-Site` value, except for the narrow debug browser-fallback rule below.
 
-Other authenticated GET routes require only step 1. Debug routes deliberately use the stronger mutation checks. The fetch-based SSE client can send `x-tmtp-csrf`; native `EventSource` cannot satisfy this contract and is not used.
+Other authenticated GET routes require only step 1. Debug routes deliberately use the stronger mutation checks. Browsers omit `Origin` on ordinary same-origin GET requests, so after steps 1 and 2 the two debug GET routes accept an absent `Origin` only when `Sec-Fetch-Site` is exactly `same-origin`. They reject absent fetch metadata, every other fetch-site value, and any present non-matching origin. This exception does not apply to logout or any state-changing route; those always require exact `Origin`. The fetch-based SSE client can send `x-tmtp-csrf`; native `EventSource` cannot satisfy this contract and is not used.
 
 ## 6. Safe HTTP DTOs
 

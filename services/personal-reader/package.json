@@ -3,6 +3,23 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "personal-reader": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/service.d.ts",
+      "import": "./dist/service.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build",
+    "test": "vitest run",
+    "test:ui": "playwright test --config test/ui/playwright.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/cli.js start",
+    "doctor": "node dist/cli.js doctor"
+  },
   "dependencies": {
     "@emotion/react": "catalog:",
     "@emotion/styled": "catalog:",
