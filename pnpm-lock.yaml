@@ -383,6 +383,13 @@ importers:
       '@tmtp/domain':
         specifier: workspace:*
         version: link:../domain
+    devDependencies:
+      '@tmtp/clock':
+        specifier: workspace:*
+        version: link:../clock
+      '@tmtp/job-queue':
+        specifier: workspace:*
+        version: link:../job-queue
 
   libs/recommendations:
     dependencies:
