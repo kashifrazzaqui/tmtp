@@ -386,6 +386,10 @@ importers:
       '@tmtp/reader-store':
         specifier: workspace:*
         version: link:../reader-store
+    devDependencies:
+      '@tmtp/database':
+        specifier: workspace:*
+        version: link:../database
 
   libs/reader-store:
     dependencies:

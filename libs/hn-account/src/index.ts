@@ -90,7 +90,10 @@ export function createHnAccount(input: HnAccountOptions): HnAccount {
       let postError: unknown;
       try { postStatus = await transport.post(form, signal, () => { dispatched = true; }); }
       catch (error) { postError = error; }
-      if (signal?.aborted) return outcome(intent, "indeterminate", "cancelled-after-dispatch");
+      if (signal?.aborted) {
+        if (dispatched) return outcome(intent, "indeterminate", "cancelled-after-dispatch");
+        throw signal.reason;
+      }
       try {
         const after = await storyPage(intent.storyId, signal);
         if (currentState(after.$, after.finalUrl, options.username, intent) === "present") return outcome(intent, "verified");

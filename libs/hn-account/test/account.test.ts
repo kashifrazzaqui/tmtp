@@ -285,6 +285,18 @@ describe("action safety and outcomes", () => {
     expect(h.requests.map((request) => request.method)).toEqual(["GET", "POST"]);
   });
 
+  it("should preserve the exact abort reason when throttle cancellation precedes POST dispatch", async () => {
+    const h = harness({ maxRequestsPerMinute: 1 });
+    h.queue.push(response(actionPage("upvote", "absent")));
+    const controller = new AbortController();
+    const reason = { abortBeforeDispatch: true };
+    const pending = createHnAccount(h.options).performAction(intent(), controller.signal);
+    await vi.waitFor(() => expect(h.waits).toHaveLength(1));
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+    expect(h.requests.map((request) => request.method)).toEqual(["GET"]);
+  });
+
   it("should share identical concurrent intents and reject conflicting reuse", async () => {
     const h = harness();
     let complete!: (value: HttpResponse) => void;
